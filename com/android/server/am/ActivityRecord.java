@@ -21,6 +21,7 @@ import com.android.internal.R.styleable;
 import com.android.internal.app.ResolverActivity;
 import com.android.server.AttributeCache;
 import com.android.server.am.ActivityStack.ActivityState;
+import com.android.server.am.ActivityStackSupervisor.ActivityContainer;
 
 import android.app.ActivityOptions;
 import android.app.ResultInfo;
@@ -138,11 +139,13 @@ final class ActivityRecord {
     boolean forceNewConfig; // force re-create with new config next time
     int launchCount;        // count of launches since last state
     long lastLaunchTime;    // time of last lauch of this activity
+    ArrayList<ActivityContainer> mChildContainers = new ArrayList<ActivityContainer>();
 
     String stringName;      // for caching of toString().
 
     private boolean inHistory;  // are we in the history stack?
     final ActivityStackSupervisor mStackSupervisor;
+    ActivityContainer mInitialActivityContainer;
 
     void dump(PrintWriter pw, String prefix) {
         final long now = SystemClock.uptimeMillis();
@@ -347,7 +350,8 @@ final class ActivityRecord {
             int _launchedFromUid, String _launchedFromPackage, Intent _intent, String _resolvedType,
             ActivityInfo aInfo, Configuration _configuration,
             ActivityRecord _resultTo, String _resultWho, int _reqCode,
-            boolean _componentSpecified, ActivityStackSupervisor supervisor) {
+            boolean _componentSpecified, ActivityStackSupervisor supervisor,
+            ActivityContainer container) {
         service = _service;
         appToken = new Token(this);
         info = aInfo;
@@ -378,6 +382,7 @@ final class ActivityRecord {
         idle = false;
         hasBeenLaunched = false;
         mStackSupervisor = supervisor;
+        mInitialActivityContainer = container;
 
         // This starts out true, since the initial state of an activity
         // is that we have everything, and we shouldn't never consider it
@@ -481,7 +486,7 @@ final class ActivityRecord {
     void setTask(TaskRecord newTask, ThumbnailHolder newThumbHolder, boolean isRoot) {
         if (task != null && task.removeActivity(this)) {
             if (task != newTask) {
-                mStackSupervisor.removeTask(task);
+                task.stack.removeTask(task);
             } else {
                 Slog.d(TAG, "!!! REMOVE THIS LOG !!! setTask: nearly removed stack=" +
                         (newTask == null ? null : newTask.stack));

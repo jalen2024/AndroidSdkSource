@@ -21,16 +21,23 @@ import com.android.internal.util.IndentingPrintWriter;
 import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.hardware.SensorManager;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.DisplayManagerGlobal;
+import android.hardware.display.DisplayManagerInternal;
+import android.hardware.display.DisplayViewport;
+import android.hardware.display.DisplayManagerInternal.DisplayTransactionListener;
 import android.hardware.display.IDisplayManager;
 import android.hardware.display.IDisplayManagerCallback;
 import android.hardware.display.WifiDisplayStatus;
+import android.hardware.input.InputManagerInternal;
 import android.os.Binder;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.IBinder.DeathRecipient;
 import android.os.Looper;
 import android.os.Message;
+import android.os.Process;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.os.SystemProperties;
@@ -41,7 +48,11 @@ import android.util.SparseArray;
 import android.view.Display;
 import android.view.DisplayInfo;
 import android.view.Surface;
+import android.view.WindowManagerInternal;
 
+import com.android.server.DisplayThread;
+import com.android.server.LocalServices;
+import com.android.server.SystemService;
 import com.android.server.UiThread;
 
 import java.io.FileDescriptor;
@@ -93,7 +104,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * avoid this by making all potentially reentrant out-calls asynchronous.
  * </p>
  */
-public final class DisplayManagerService extends IDisplayManager.Stub {
+public final class DisplayManagerService extends SystemService {
     private static final String TAG = "DisplayManagerService";
     private static final boolean DEBUG = false;
 
@@ -102,7 +113,6 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
     // Otherwise WFD is enabled according to the value of config_enableWifiDisplay.
     private static final String FORCE_WIFI_DISPLAY_ENABLE = "persist.debug.wfd.enable";
 
-    private static final String SYSTEM_HEADLESS = "ro.config.headless";
     private static final long WAIT_FOR_DEFAULT_DISPLAY_TIMEOUT = 10000;
 
     private static final int MSG_REGISTER_DEFAULT_DISPLAY_ADAPTER = 1;
@@ -111,17 +121,12 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
     private static final int MSG_REQUEST_TRAVERSAL = 4;
     private static final int MSG_UPDATE_VIEWPORT = 5;
 
-    private static final int DISPLAY_BLANK_STATE_UNKNOWN = 0;
-    private static final int DISPLAY_BLANK_STATE_BLANKED = 1;
-    private static final int DISPLAY_BLANK_STATE_UNBLANKED = 2;
-
     private final Context mContext;
-    private final boolean mHeadless;
     private final DisplayManagerHandler mHandler;
     private final Handler mUiHandler;
     private final DisplayAdapterListener mDisplayAdapterListener;
-    private WindowManagerFuncs mWindowManagerFuncs;
-    private InputManagerFuncs mInputManagerFuncs;
+    private WindowManagerInternal mWindowManagerInternal;
+    private InputManagerInternal mInputManagerInternal;
 
     // The synchronization root for the display manager.
     // This lock guards most of the display manager's state.
@@ -164,8 +169,12 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
     private final CopyOnWriteArrayList<DisplayTransactionListener> mDisplayTransactionListeners =
             new CopyOnWriteArrayList<DisplayTransactionListener>();
 
-    // Set to true if all displays have been blanked by the power manager.
-    private int mAllDisplayBlankStateFromPowerManager = DISPLAY_BLANK_STATE_UNKNOWN;
+    // Display power controller.
+    private DisplayPowerController mDisplayPowerController;
+
+    // The overall display state, independent of changes that might influence one
+    // display or another in particular.
+    private int mGlobalDisplayState = Display.STATE_UNKNOWN;
 
     // Set to true when there are pending display changes that have yet to be applied
     // to the surface flinger state.
@@ -200,59 +209,52 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
     private final DisplayViewport mTempDefaultViewport = new DisplayViewport();
     private final DisplayViewport mTempExternalTouchViewport = new DisplayViewport();
 
-    public DisplayManagerService(Context context, Handler mainHandler) {
+    public DisplayManagerService(Context context) {
+        super(context);
         mContext = context;
-        mHeadless = SystemProperties.get(SYSTEM_HEADLESS).equals("1");
-
-        mHandler = new DisplayManagerHandler(mainHandler.getLooper());
+        mHandler = new DisplayManagerHandler(DisplayThread.get().getLooper());
         mUiHandler = UiThread.getHandler();
         mDisplayAdapterListener = new DisplayAdapterListener();
         mSingleDisplayDemoMode = SystemProperties.getBoolean("persist.demo.singledisplay", false);
-
-        mHandler.sendEmptyMessage(MSG_REGISTER_DEFAULT_DISPLAY_ADAPTER);
     }
 
-    /**
-     * Pauses the boot process to wait for the first display to be initialized.
-     */
-    public boolean waitForDefaultDisplay() {
-        synchronized (mSyncRoot) {
-            long timeout = SystemClock.uptimeMillis() + WAIT_FOR_DEFAULT_DISPLAY_TIMEOUT;
-            while (mLogicalDisplays.get(Display.DEFAULT_DISPLAY) == null) {
-                long delay = timeout - SystemClock.uptimeMillis();
-                if (delay <= 0) {
-                    return false;
-                }
-                if (DEBUG) {
-                    Slog.d(TAG, "waitForDefaultDisplay: waiting, timeout=" + delay);
-                }
-                try {
-                    mSyncRoot.wait(delay);
-                } catch (InterruptedException ex) {
+    @Override
+    public void onStart() {
+        mHandler.sendEmptyMessage(MSG_REGISTER_DEFAULT_DISPLAY_ADAPTER);
+
+        publishBinderService(Context.DISPLAY_SERVICE, new BinderService(),
+                true /*allowIsolated*/);
+        publishLocalService(DisplayManagerInternal.class, new LocalService());
+    }
+
+    @Override
+    public void onBootPhase(int phase) {
+        if (phase == PHASE_WAIT_FOR_DEFAULT_DISPLAY) {
+            synchronized (mSyncRoot) {
+                long timeout = SystemClock.uptimeMillis() + WAIT_FOR_DEFAULT_DISPLAY_TIMEOUT;
+                while (mLogicalDisplays.get(Display.DEFAULT_DISPLAY) == null) {
+                    long delay = timeout - SystemClock.uptimeMillis();
+                    if (delay <= 0) {
+                        throw new RuntimeException("Timeout waiting for default display "
+                                + "to be initialized.");
+                    }
+                    if (DEBUG) {
+                        Slog.d(TAG, "waitForDefaultDisplay: waiting, timeout=" + delay);
+                    }
+                    try {
+                        mSyncRoot.wait(delay);
+                    } catch (InterruptedException ex) {
+                    }
                 }
             }
         }
-        return true;
     }
 
-    /**
-     * Called during initialization to associate the display manager with the
-     * window manager.
-     */
-    public void setWindowManager(WindowManagerFuncs windowManagerFuncs) {
+    // TODO: Use dependencies or a boot phase
+    public void windowManagerAndInputReady() {
         synchronized (mSyncRoot) {
-            mWindowManagerFuncs = windowManagerFuncs;
-            scheduleTraversalLocked(false);
-        }
-    }
-
-    /**
-     * Called during initialization to associate the display manager with the
-     * input manager.
-     */
-    public void setInputManager(InputManagerFuncs inputManagerFuncs) {
-        synchronized (mSyncRoot) {
-            mInputManagerFuncs = inputManagerFuncs;
+            mWindowManagerInternal = LocalServices.getService(WindowManagerInternal.class);
+            mInputManagerInternal = LocalServices.getService(InputManagerInternal.class);
             scheduleTraversalLocked(false);
         }
     }
@@ -269,59 +271,19 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
         mHandler.sendEmptyMessage(MSG_REGISTER_ADDITIONAL_DISPLAY_ADAPTERS);
     }
 
-    /**
-     * Returns true if the device is headless.
-     *
-     * @return True if the device is headless.
-     */
-    public boolean isHeadless() {
-        return mHeadless;
-    }
-
-    /**
-     * Registers a display transaction listener to provide the client a chance to
-     * update its surfaces within the same transaction as any display layout updates.
-     *
-     * @param listener The listener to register.
-     */
-    public void registerDisplayTransactionListener(DisplayTransactionListener listener) {
-        if (listener == null) {
-            throw new IllegalArgumentException("listener must not be null");
-        }
-
+    private void registerDisplayTransactionListenerInternal(
+            DisplayTransactionListener listener) {
         // List is self-synchronized copy-on-write.
         mDisplayTransactionListeners.add(listener);
     }
 
-    /**
-     * Unregisters a display transaction listener to provide the client a chance to
-     * update its surfaces within the same transaction as any display layout updates.
-     *
-     * @param listener The listener to unregister.
-     */
-    public void unregisterDisplayTransactionListener(DisplayTransactionListener listener) {
-        if (listener == null) {
-            throw new IllegalArgumentException("listener must not be null");
-        }
-
+    private void unregisterDisplayTransactionListenerInternal(
+            DisplayTransactionListener listener) {
         // List is self-synchronized copy-on-write.
         mDisplayTransactionListeners.remove(listener);
     }
 
-    /**
-     * Overrides the display information of a particular logical display.
-     * This is used by the window manager to control the size and characteristics
-     * of the default display.  It is expected to apply the requested change
-     * to the display information synchronously so that applications will immediately
-     * observe the new state.
-     *
-     * NOTE: This method must be the only entry point by which the window manager
-     * influences the logical configuration of displays.
-     *
-     * @param displayId The logical display id.
-     * @param info The new data to be stored.
-     */
-    public void setDisplayInfoOverrideFromWindowManager(
+    private void setDisplayInfoOverrideFromWindowManagerInternal(
             int displayId, DisplayInfo info) {
         synchronized (mSyncRoot) {
             LogicalDisplay display = mLogicalDisplays.get(displayId);
@@ -334,11 +296,7 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
         }
     }
 
-    /**
-     * Called by the window manager to perform traversals while holding a
-     * surface flinger transaction.
-     */
-    public void performTraversalInTransactionFromWindowManager() {
+    private void performTraversalInTransactionFromWindowManagerInternal() {
         synchronized (mSyncRoot) {
             if (!mPendingTraversal) {
                 return;
@@ -354,96 +312,50 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
         }
     }
 
-    /**
-     * Called by the power manager to blank all displays.
-     */
-    public void blankAllDisplaysFromPowerManager() {
+    private void requestGlobalDisplayStateInternal(int state) {
         synchronized (mSyncRoot) {
-            if (mAllDisplayBlankStateFromPowerManager != DISPLAY_BLANK_STATE_BLANKED) {
-                mAllDisplayBlankStateFromPowerManager = DISPLAY_BLANK_STATE_BLANKED;
-                updateAllDisplayBlankingLocked();
+            if (mGlobalDisplayState != state) {
+                mGlobalDisplayState = state;
+                updateGlobalDisplayStateLocked();
                 scheduleTraversalLocked(false);
             }
         }
     }
 
-    /**
-     * Called by the power manager to unblank all displays.
-     */
-    public void unblankAllDisplaysFromPowerManager() {
+    private DisplayInfo getDisplayInfoInternal(int displayId, int callingUid) {
         synchronized (mSyncRoot) {
-            if (mAllDisplayBlankStateFromPowerManager != DISPLAY_BLANK_STATE_UNBLANKED) {
-                mAllDisplayBlankStateFromPowerManager = DISPLAY_BLANK_STATE_UNBLANKED;
-                updateAllDisplayBlankingLocked();
-                scheduleTraversalLocked(false);
+            LogicalDisplay display = mLogicalDisplays.get(displayId);
+            if (display != null) {
+                DisplayInfo info = display.getDisplayInfoLocked();
+                if (info.hasAccess(callingUid)) {
+                    return info;
+                }
             }
+            return null;
         }
     }
 
-    /**
-     * Returns information about the specified logical display.
-     *
-     * @param displayId The logical display id.
-     * @return The logical display info, or null if the display does not exist.  The
-     * returned object must be treated as immutable.
-     */
-    @Override // Binder call
-    public DisplayInfo getDisplayInfo(int displayId) {
-        final int callingUid = Binder.getCallingUid();
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                LogicalDisplay display = mLogicalDisplays.get(displayId);
-                if (display != null) {
-                    DisplayInfo info = display.getDisplayInfoLocked();
-                    if (info.hasAccess(callingUid)) {
-                        return info;
-                    }
-                }
-                return null;
-            }
-        } finally {
-            Binder.restoreCallingIdentity(token);
-        }
-    }
-
-    /**
-     * Returns the list of all display ids.
-     */
-    @Override // Binder call
-    public int[] getDisplayIds() {
-        final int callingUid = Binder.getCallingUid();
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                final int count = mLogicalDisplays.size();
-                int[] displayIds = new int[count];
-                int n = 0;
-                for (int i = 0; i < count; i++) {
-                    LogicalDisplay display = mLogicalDisplays.valueAt(i);
-                    DisplayInfo info = display.getDisplayInfoLocked();
-                    if (info.hasAccess(callingUid)) {
-                        displayIds[n++] = mLogicalDisplays.keyAt(i);
-                    }
-                }
-                if (n != count) {
-                    displayIds = Arrays.copyOfRange(displayIds, 0, n);
-                }
-                return displayIds;
-            }
-        } finally {
-            Binder.restoreCallingIdentity(token);
-        }
-    }
-
-    @Override // Binder call
-    public void registerCallback(IDisplayManagerCallback callback) {
-        if (callback == null) {
-            throw new IllegalArgumentException("listener must not be null");
-        }
-
+    private int[] getDisplayIdsInternal(int callingUid) {
         synchronized (mSyncRoot) {
-            int callingPid = Binder.getCallingPid();
+            final int count = mLogicalDisplays.size();
+            int[] displayIds = new int[count];
+            int n = 0;
+            for (int i = 0; i < count; i++) {
+                LogicalDisplay display = mLogicalDisplays.valueAt(i);
+                DisplayInfo info = display.getDisplayInfoLocked();
+                if (info.hasAccess(callingUid)) {
+                    displayIds[n++] = mLogicalDisplays.keyAt(i);
+                }
+            }
+            if (n != count) {
+                displayIds = Arrays.copyOfRange(displayIds, 0, n);
+            }
+            return displayIds;
+        }
+    }
+
+    private void registerCallbackInternal(IDisplayManagerCallback callback, int callingPid) {
+        synchronized (mSyncRoot) {
             if (mCallbacks.get(callingPid) != null) {
                 throw new SecurityException("The calling process has already "
                         + "registered an IDisplayManagerCallback.");
@@ -469,24 +381,14 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
         }
     }
 
-    @Override // Binder call
-    public void startWifiDisplayScan() {
-        mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
-                "Permission required to start wifi display scans");
-
-        final int callingPid = Binder.getCallingPid();
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                CallbackRecord record = mCallbacks.get(callingPid);
-                if (record == null) {
-                    throw new IllegalStateException("The calling process has not "
-                            + "registered an IDisplayManagerCallback.");
-                }
-                startWifiDisplayScanLocked(record);
+    private void startWifiDisplayScanInternal(int callingPid) {
+        synchronized (mSyncRoot) {
+            CallbackRecord record = mCallbacks.get(callingPid);
+            if (record == null) {
+                throw new IllegalStateException("The calling process has not "
+                        + "registered an IDisplayManagerCallback.");
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
+            startWifiDisplayScanLocked(record);
         }
     }
 
@@ -501,24 +403,14 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
         }
     }
 
-    @Override // Binder call
-    public void stopWifiDisplayScan() {
-        mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
-                "Permission required to stop wifi display scans");
-
-        final int callingPid = Binder.getCallingPid();
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                CallbackRecord record = mCallbacks.get(callingPid);
-                if (record == null) {
-                    throw new IllegalStateException("The calling process has not "
-                            + "registered an IDisplayManagerCallback.");
-                }
-                stopWifiDisplayScanLocked(record);
+    private void stopWifiDisplayScanInternal(int callingPid) {
+        synchronized (mSyncRoot) {
+            CallbackRecord record = mCallbacks.get(callingPid);
+            if (record == null) {
+                throw new IllegalStateException("The calling process has not "
+                        + "registered an IDisplayManagerCallback.");
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
+            stopWifiDisplayScanLocked(record);
         }
     }
 
@@ -537,255 +429,123 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
         }
     }
 
-    @Override // Binder call
-    public void connectWifiDisplay(String address) {
-        if (address == null) {
-            throw new IllegalArgumentException("address must not be null");
-        }
-        mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
-                "Permission required to connect to a wifi display");
-
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                if (mWifiDisplayAdapter != null) {
-                    mWifiDisplayAdapter.requestConnectLocked(address);
-                }
+    private void connectWifiDisplayInternal(String address) {
+        synchronized (mSyncRoot) {
+            if (mWifiDisplayAdapter != null) {
+                mWifiDisplayAdapter.requestConnectLocked(address);
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
         }
     }
 
-    @Override
-    public void pauseWifiDisplay() {
-        mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
-                "Permission required to pause a wifi display session");
-
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                if (mWifiDisplayAdapter != null) {
-                    mWifiDisplayAdapter.requestPauseLocked();
-                }
+    private void pauseWifiDisplayInternal() {
+        synchronized (mSyncRoot) {
+            if (mWifiDisplayAdapter != null) {
+                mWifiDisplayAdapter.requestPauseLocked();
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
         }
     }
 
-    @Override
-    public void resumeWifiDisplay() {
-        mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
-                "Permission required to resume a wifi display session");
-
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                if (mWifiDisplayAdapter != null) {
-                    mWifiDisplayAdapter.requestResumeLocked();
-                }
+    private void resumeWifiDisplayInternal() {
+        synchronized (mSyncRoot) {
+            if (mWifiDisplayAdapter != null) {
+                mWifiDisplayAdapter.requestResumeLocked();
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
         }
     }
 
-    @Override // Binder call
-    public void disconnectWifiDisplay() {
-        // This request does not require special permissions.
-        // Any app can request disconnection from the currently active wifi display.
-        // This exception should no longer be needed once wifi display control moves
-        // to the media router service.
-
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                if (mWifiDisplayAdapter != null) {
-                    mWifiDisplayAdapter.requestDisconnectLocked();
-                }
+    private void disconnectWifiDisplayInternal() {
+        synchronized (mSyncRoot) {
+            if (mWifiDisplayAdapter != null) {
+                mWifiDisplayAdapter.requestDisconnectLocked();
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
         }
     }
 
-    @Override // Binder call
-    public void renameWifiDisplay(String address, String alias) {
-        if (address == null) {
-            throw new IllegalArgumentException("address must not be null");
-        }
-        mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
-                "Permission required to rename to a wifi display");
-
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                if (mWifiDisplayAdapter != null) {
-                    mWifiDisplayAdapter.requestRenameLocked(address, alias);
-                }
+    private void renameWifiDisplayInternal(String address, String alias) {
+        synchronized (mSyncRoot) {
+            if (mWifiDisplayAdapter != null) {
+                mWifiDisplayAdapter.requestRenameLocked(address, alias);
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
         }
     }
 
-    @Override // Binder call
-    public void forgetWifiDisplay(String address) {
-        if (address == null) {
-            throw new IllegalArgumentException("address must not be null");
-        }
-        mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
-                "Permission required to forget to a wifi display");
-
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                if (mWifiDisplayAdapter != null) {
-                    mWifiDisplayAdapter.requestForgetLocked(address);
-                }
+    private void forgetWifiDisplayInternal(String address) {
+        synchronized (mSyncRoot) {
+            if (mWifiDisplayAdapter != null) {
+                mWifiDisplayAdapter.requestForgetLocked(address);
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
         }
     }
 
-    @Override // Binder call
-    public WifiDisplayStatus getWifiDisplayStatus() {
-        // This request does not require special permissions.
-        // Any app can get information about available wifi displays.
-
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                if (mWifiDisplayAdapter != null) {
-                    return mWifiDisplayAdapter.getWifiDisplayStatusLocked();
-                }
-                return new WifiDisplayStatus();
+    private WifiDisplayStatus getWifiDisplayStatusInternal() {
+        synchronized (mSyncRoot) {
+            if (mWifiDisplayAdapter != null) {
+                return mWifiDisplayAdapter.getWifiDisplayStatusLocked();
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
+            return new WifiDisplayStatus();
         }
     }
 
-    @Override // Binder call
-    public int createVirtualDisplay(IBinder appToken, String packageName,
+    private int createVirtualDisplayInternal(IBinder appToken, int callingUid, String packageName,
             String name, int width, int height, int densityDpi, Surface surface, int flags) {
-        final int callingUid = Binder.getCallingUid();
-        if (!validatePackageName(callingUid, packageName)) {
-            throw new SecurityException("packageName must match the calling uid");
-        }
-        if (appToken == null) {
-            throw new IllegalArgumentException("appToken must not be null");
-        }
-        if (TextUtils.isEmpty(name)) {
-            throw new IllegalArgumentException("name must be non-null and non-empty");
-        }
-        if (width <= 0 || height <= 0 || densityDpi <= 0) {
-            throw new IllegalArgumentException("width, height, and densityDpi must be "
-                    + "greater than 0");
-        }
-        if (surface == null) {
-            throw new IllegalArgumentException("surface must not be null");
-        }
-        if ((flags & DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC) != 0) {
-            if (mContext.checkCallingPermission(android.Manifest.permission.CAPTURE_VIDEO_OUTPUT)
-                    != PackageManager.PERMISSION_GRANTED
-                    && mContext.checkCallingPermission(
-                            android.Manifest.permission.CAPTURE_SECURE_VIDEO_OUTPUT)
-                            != PackageManager.PERMISSION_GRANTED) {
-                throw new SecurityException("Requires CAPTURE_VIDEO_OUTPUT or "
-                        + "CAPTURE_SECURE_VIDEO_OUTPUT permission to create a "
-                        + "public virtual display.");
+        synchronized (mSyncRoot) {
+            if (mVirtualDisplayAdapter == null) {
+                Slog.w(TAG, "Rejecting request to create private virtual display "
+                        + "because the virtual display adapter is not available.");
+                return -1;
             }
-        }
-        if ((flags & DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE) != 0) {
-            if (mContext.checkCallingPermission(
-                    android.Manifest.permission.CAPTURE_SECURE_VIDEO_OUTPUT)
-                    != PackageManager.PERMISSION_GRANTED) {
-                throw new SecurityException("Requires CAPTURE_SECURE_VIDEO_OUTPUT "
-                        + "to create a secure virtual display.");
+
+            DisplayDevice device = mVirtualDisplayAdapter.createVirtualDisplayLocked(
+                    appToken, callingUid, packageName, name, width, height, densityDpi,
+                    surface, flags);
+            if (device == null) {
+                return -1;
             }
-        }
 
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                if (mVirtualDisplayAdapter == null) {
-                    Slog.w(TAG, "Rejecting request to create private virtual display "
-                            + "because the virtual display adapter is not available.");
-                    return -1;
-                }
-
-                DisplayDevice device = mVirtualDisplayAdapter.createVirtualDisplayLocked(
-                        appToken, callingUid, packageName, name, width, height, densityDpi,
-                        surface, flags);
-                if (device == null) {
-                    return -1;
-                }
-
-                handleDisplayDeviceAddedLocked(device);
-                LogicalDisplay display = findLogicalDisplayForDeviceLocked(device);
-                if (display != null) {
-                    return display.getDisplayIdLocked();
-                }
-
-                // Something weird happened and the logical display was not created.
-                Slog.w(TAG, "Rejecting request to create virtual display "
-                        + "because the logical display was not created.");
-                mVirtualDisplayAdapter.releaseVirtualDisplayLocked(appToken);
-                handleDisplayDeviceRemovedLocked(device);
+            handleDisplayDeviceAddedLocked(device);
+            LogicalDisplay display = findLogicalDisplayForDeviceLocked(device);
+            if (display != null) {
+                return display.getDisplayIdLocked();
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
+
+            // Something weird happened and the logical display was not created.
+            Slog.w(TAG, "Rejecting request to create virtual display "
+                    + "because the logical display was not created.");
+            mVirtualDisplayAdapter.releaseVirtualDisplayLocked(appToken);
+            handleDisplayDeviceRemovedLocked(device);
         }
         return -1;
     }
 
-    @Override // Binder call
-    public void releaseVirtualDisplay(IBinder appToken) {
-        final long token = Binder.clearCallingIdentity();
-        try {
-            synchronized (mSyncRoot) {
-                if (mVirtualDisplayAdapter == null) {
-                    return;
-                }
-
-                DisplayDevice device =
-                        mVirtualDisplayAdapter.releaseVirtualDisplayLocked(appToken);
-                if (device != null) {
-                    handleDisplayDeviceRemovedLocked(device);
-                }
+    private void setVirtualDisplaySurfaceInternal(IBinder appToken, Surface surface) {
+        synchronized (mSyncRoot) {
+            if (mVirtualDisplayAdapter == null) {
+                return;
             }
-        } finally {
-            Binder.restoreCallingIdentity(token);
+
+            mVirtualDisplayAdapter.setVirtualDisplaySurfaceLocked(appToken, surface);
         }
     }
 
-    private boolean validatePackageName(int uid, String packageName) {
-        if (packageName != null) {
-            String[] packageNames = mContext.getPackageManager().getPackagesForUid(uid);
-            if (packageNames != null) {
-                for (String n : packageNames) {
-                    if (n.equals(packageName)) {
-                        return true;
-                    }
-                }
+    private void releaseVirtualDisplayInternal(IBinder appToken) {
+        synchronized (mSyncRoot) {
+            if (mVirtualDisplayAdapter == null) {
+                return;
+            }
+
+            DisplayDevice device =
+                    mVirtualDisplayAdapter.releaseVirtualDisplayLocked(appToken);
+            if (device != null) {
+                handleDisplayDeviceRemovedLocked(device);
             }
         }
-        return false;
     }
 
     private void registerDefaultDisplayAdapter() {
         // Register default display adapter.
         synchronized (mSyncRoot) {
-            if (mHeadless) {
-                registerDisplayAdapterLocked(new HeadlessDisplayAdapter(
-                        mSyncRoot, mContext, mHandler, mDisplayAdapterListener));
-            } else {
-                registerDisplayAdapterLocked(new LocalDisplayAdapter(
-                        mSyncRoot, mContext, mHandler, mDisplayAdapterListener));
-            }
+            registerDisplayAdapterLocked(new LocalDisplayAdapter(
+                    mSyncRoot, mContext, mHandler, mDisplayAdapterListener));
         }
     }
 
@@ -853,7 +613,7 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
 
         mDisplayDevices.add(device);
         addLogicalDisplayLocked(device);
-        updateDisplayBlankingLocked(device);
+        updateDisplayStateLocked(device);
         scheduleTraversalLocked(false);
     }
 
@@ -892,27 +652,20 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
         scheduleTraversalLocked(false);
     }
 
-    private void updateAllDisplayBlankingLocked() {
+    private void updateGlobalDisplayStateLocked() {
         final int count = mDisplayDevices.size();
         for (int i = 0; i < count; i++) {
             DisplayDevice device = mDisplayDevices.get(i);
-            updateDisplayBlankingLocked(device);
+            updateDisplayStateLocked(device);
         }
     }
 
-    private void updateDisplayBlankingLocked(DisplayDevice device) {
+    private void updateDisplayStateLocked(DisplayDevice device) {
         // Blank or unblank the display immediately to match the state requested
-        // by the power manager (if known).
+        // by the display power controller (if known).
         DisplayDeviceInfo info = device.getDisplayDeviceInfoLocked();
         if ((info.flags & DisplayDeviceInfo.FLAG_NEVER_BLANK) == 0) {
-            switch (mAllDisplayBlankStateFromPowerManager) {
-                case DISPLAY_BLANK_STATE_BLANKED:
-                    device.blankLocked();
-                    break;
-                case DISPLAY_BLANK_STATE_UNBLANKED:
-                    device.unblankLocked();
-                    break;
-            }
+            device.requestDisplayStateLocked(mGlobalDisplayState);
         }
     }
 
@@ -1002,26 +755,13 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
         }
 
         // Tell the input system about these new viewports.
-        if (mInputManagerFuncs != null) {
+        if (mInputManagerInternal != null) {
             mHandler.sendEmptyMessage(MSG_UPDATE_VIEWPORT);
         }
     }
 
-    /**
-     * Tells the display manager whether there is interesting unique content on the
-     * specified logical display.  This is used to control automatic mirroring.
-     * <p>
-     * If the display has unique content, then the display manager arranges for it
-     * to be presented on a physical display if appropriate.  Otherwise, the display manager
-     * may choose to make the physical display mirror some other logical display.
-     * </p>
-     *
-     * @param displayId The logical display id to update.
-     * @param hasContent True if the logical display has content.
-     * @param inTraversal True if called from WindowManagerService during a window traversal prior
-     * to call to performTraversalInTransactionFromWindowManager.
-     */
-    public void setDisplayHasContent(int displayId, boolean hasContent, boolean inTraversal) {
+    private void setDisplayHasContentInternal(int displayId, boolean hasContent,
+            boolean inTraversal) {
         synchronized (mSyncRoot) {
             LogicalDisplay display = mLogicalDisplays.get(displayId);
             if (display != null && display.hasContentLocked() != hasContent) {
@@ -1042,13 +782,13 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
     }
 
     private void configureDisplayInTransactionLocked(DisplayDevice device) {
-        DisplayDeviceInfo info = device.getDisplayDeviceInfoLocked();
-        boolean isPrivate = (info.flags & DisplayDeviceInfo.FLAG_PRIVATE) != 0;
+        final DisplayDeviceInfo info = device.getDisplayDeviceInfoLocked();
+        final boolean ownContent = (info.flags & DisplayDeviceInfo.FLAG_OWN_CONTENT_ONLY) != 0;
 
         // Find the logical display that the display device is showing.
-        // Private displays never mirror other displays.
+        // Certain displays only ever show their own content.
         LogicalDisplay display = findLogicalDisplayForDeviceLocked(device);
-        if (!isPrivate) {
+        if (!ownContent) {
             if (display != null && !display.hasContentLocked()) {
                 // If the display does not have any content of its own, then
                 // automatically mirror the default logical display contents.
@@ -1066,9 +806,7 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
                     + device.getDisplayDeviceInfoLocked());
             return;
         }
-        boolean isBlanked = (mAllDisplayBlankStateFromPowerManager == DISPLAY_BLANK_STATE_BLANKED)
-                && (info.flags & DisplayDeviceInfo.FLAG_NEVER_BLANK) == 0;
-        display.configureDisplayInTransactionLocked(device, isBlanked);
+        display.configureDisplayInTransactionLocked(device, info.state == Display.STATE_OFF);
 
         // Update the viewports if needed.
         if (!mDefaultViewport.valid
@@ -1107,7 +845,7 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
     // Requests that performTraversalsInTransactionFromWindowManager be called at a
     // later time to apply changes to surfaces and displays.
     private void scheduleTraversalLocked(boolean inTraversal) {
-        if (!mPendingTraversal && mWindowManagerFuncs != null) {
+        if (!mPendingTraversal && mWindowManagerInternal != null) {
             mPendingTraversal = true;
             if (!inTraversal) {
                 mHandler.sendEmptyMessage(MSG_REQUEST_TRAVERSAL);
@@ -1140,25 +878,14 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
         mTempCallbacks.clear();
     }
 
-    @Override // Binder call
-    public void dump(FileDescriptor fd, final PrintWriter pw, String[] args) {
-        if (mContext == null
-                || mContext.checkCallingOrSelfPermission(Manifest.permission.DUMP)
-                        != PackageManager.PERMISSION_GRANTED) {
-            pw.println("Permission Denial: can't dump DisplayManager from from pid="
-                    + Binder.getCallingPid() + ", uid=" + Binder.getCallingUid());
-            return;
-        }
-
+    private void dumpInternal(PrintWriter pw) {
         pw.println("DISPLAY MANAGER (dumpsys display)");
 
         synchronized (mSyncRoot) {
-            pw.println("  mHeadless=" + mHeadless);
             pw.println("  mOnlyCode=" + mOnlyCore);
             pw.println("  mSafeMode=" + mSafeMode);
             pw.println("  mPendingTraversal=" + mPendingTraversal);
-            pw.println("  mAllDisplayBlankStateFromPowerManager="
-                    + mAllDisplayBlankStateFromPowerManager);
+            pw.println("  mGlobalDisplayState=" + Display.stateToString(mGlobalDisplayState));
             pw.println("  mNextNonDefaultDisplayId=" + mNextNonDefaultDisplayId);
             pw.println("  mDefaultViewport=" + mDefaultViewport);
             pw.println("  mExternalTouchViewport=" + mExternalTouchViewport);
@@ -1200,6 +927,10 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
                 pw.println("  " + i + ": mPid=" + callback.mPid
                         + ", mWifiDisplayScanRequested=" + callback.mWifiDisplayScanRequested);
             }
+
+            if (mDisplayPowerController != null) {
+                mDisplayPowerController.dump(pw);
+            }
         }
     }
 
@@ -1210,30 +941,6 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
      * a unique object with a special purpose.
      */
     public static final class SyncRoot {
-    }
-
-    /**
-     * Private interface to the window manager.
-     */
-    public interface WindowManagerFuncs {
-        /**
-         * Request that the window manager call
-         * {@link #performTraversalInTransactionFromWindowManager} within a surface
-         * transaction at a later time.
-         */
-        void requestTraversal();
-    }
-
-    /**
-     * Private interface to the input manager.
-     */
-    public interface InputManagerFuncs {
-        /**
-         * Sets information about the displays as needed by the input system.
-         * The input system should copy this information if required.
-         */
-        void setDisplayViewports(DisplayViewport defaultViewport,
-                DisplayViewport externalTouchViewport);
     }
 
     private final class DisplayManagerHandler extends Handler {
@@ -1257,7 +964,7 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
                     break;
 
                 case MSG_REQUEST_TRAVERSAL:
-                    mWindowManagerFuncs.requestTraversal();
+                    mWindowManagerInternal.requestTraversalFromDisplayManager();
                     break;
 
                 case MSG_UPDATE_VIEWPORT: {
@@ -1265,7 +972,7 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
                         mTempDefaultViewport.copyFrom(mDefaultViewport);
                         mTempExternalTouchViewport.copyFrom(mExternalTouchViewport);
                     }
-                    mInputManagerFuncs.setDisplayViewports(
+                    mInputManagerInternal.setDisplayViewports(
                             mTempDefaultViewport, mTempExternalTouchViewport);
                     break;
                 }
@@ -1326,6 +1033,360 @@ public final class DisplayManagerService extends IDisplayManager.Stub {
                         + mPid + " that displays changed, assuming it died.", ex);
                 binderDied();
             }
+        }
+    }
+
+    private final class BinderService extends IDisplayManager.Stub {
+        /**
+         * Returns information about the specified logical display.
+         *
+         * @param displayId The logical display id.
+         * @return The logical display info, or null if the display does not exist.  The
+         * returned object must be treated as immutable.
+         */
+        @Override // Binder call
+        public DisplayInfo getDisplayInfo(int displayId) {
+            final int callingUid = Binder.getCallingUid();
+            final long token = Binder.clearCallingIdentity();
+            try {
+                return getDisplayInfoInternal(displayId, callingUid);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        /**
+         * Returns the list of all display ids.
+         */
+        @Override // Binder call
+        public int[] getDisplayIds() {
+            final int callingUid = Binder.getCallingUid();
+            final long token = Binder.clearCallingIdentity();
+            try {
+                return getDisplayIdsInternal(callingUid);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void registerCallback(IDisplayManagerCallback callback) {
+            if (callback == null) {
+                throw new IllegalArgumentException("listener must not be null");
+            }
+
+            final int callingPid = Binder.getCallingPid();
+            final long token = Binder.clearCallingIdentity();
+            try {
+                registerCallbackInternal(callback, callingPid);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void startWifiDisplayScan() {
+            mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
+                    "Permission required to start wifi display scans");
+
+            final int callingPid = Binder.getCallingPid();
+            final long token = Binder.clearCallingIdentity();
+            try {
+                startWifiDisplayScanInternal(callingPid);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void stopWifiDisplayScan() {
+            mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
+                    "Permission required to stop wifi display scans");
+
+            final int callingPid = Binder.getCallingPid();
+            final long token = Binder.clearCallingIdentity();
+            try {
+                stopWifiDisplayScanInternal(callingPid);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void connectWifiDisplay(String address) {
+            if (address == null) {
+                throw new IllegalArgumentException("address must not be null");
+            }
+            mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
+                    "Permission required to connect to a wifi display");
+
+            final long token = Binder.clearCallingIdentity();
+            try {
+                connectWifiDisplayInternal(address);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void disconnectWifiDisplay() {
+            // This request does not require special permissions.
+            // Any app can request disconnection from the currently active wifi display.
+            // This exception should no longer be needed once wifi display control moves
+            // to the media router service.
+
+            final long token = Binder.clearCallingIdentity();
+            try {
+                disconnectWifiDisplayInternal();
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void renameWifiDisplay(String address, String alias) {
+            if (address == null) {
+                throw new IllegalArgumentException("address must not be null");
+            }
+            mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
+                    "Permission required to rename to a wifi display");
+
+            final long token = Binder.clearCallingIdentity();
+            try {
+                renameWifiDisplayInternal(address, alias);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void forgetWifiDisplay(String address) {
+            if (address == null) {
+                throw new IllegalArgumentException("address must not be null");
+            }
+            mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
+                    "Permission required to forget to a wifi display");
+
+            final long token = Binder.clearCallingIdentity();
+            try {
+                forgetWifiDisplayInternal(address);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void pauseWifiDisplay() {
+            mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
+                    "Permission required to pause a wifi display session");
+
+            final long token = Binder.clearCallingIdentity();
+            try {
+                pauseWifiDisplayInternal();
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void resumeWifiDisplay() {
+            mContext.enforceCallingOrSelfPermission(Manifest.permission.CONFIGURE_WIFI_DISPLAY,
+                    "Permission required to resume a wifi display session");
+
+            final long token = Binder.clearCallingIdentity();
+            try {
+                resumeWifiDisplayInternal();
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public WifiDisplayStatus getWifiDisplayStatus() {
+            // This request does not require special permissions.
+            // Any app can get information about available wifi displays.
+
+            final long token = Binder.clearCallingIdentity();
+            try {
+                return getWifiDisplayStatusInternal();
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public int createVirtualDisplay(IBinder appToken, String packageName,
+                String name, int width, int height, int densityDpi, Surface surface, int flags) {
+            final int callingUid = Binder.getCallingUid();
+            if (!validatePackageName(callingUid, packageName)) {
+                throw new SecurityException("packageName must match the calling uid");
+            }
+            if (appToken == null) {
+                throw new IllegalArgumentException("appToken must not be null");
+            }
+            if (TextUtils.isEmpty(name)) {
+                throw new IllegalArgumentException("name must be non-null and non-empty");
+            }
+            if (width <= 0 || height <= 0 || densityDpi <= 0) {
+                throw new IllegalArgumentException("width, height, and densityDpi must be "
+                        + "greater than 0");
+            }
+            if (callingUid != Process.SYSTEM_UID &&
+                    (flags & DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC) != 0) {
+                if (mContext.checkCallingPermission(android.Manifest.permission.CAPTURE_VIDEO_OUTPUT)
+                        != PackageManager.PERMISSION_GRANTED
+                        && mContext.checkCallingPermission(
+                                android.Manifest.permission.CAPTURE_SECURE_VIDEO_OUTPUT)
+                                != PackageManager.PERMISSION_GRANTED) {
+                    throw new SecurityException("Requires CAPTURE_VIDEO_OUTPUT or "
+                            + "CAPTURE_SECURE_VIDEO_OUTPUT permission to create a "
+                            + "public virtual display.");
+                }
+            }
+            if ((flags & DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE) != 0) {
+                if (mContext.checkCallingPermission(
+                        android.Manifest.permission.CAPTURE_SECURE_VIDEO_OUTPUT)
+                        != PackageManager.PERMISSION_GRANTED) {
+                    throw new SecurityException("Requires CAPTURE_SECURE_VIDEO_OUTPUT "
+                            + "to create a secure virtual display.");
+                }
+            }
+
+            final long token = Binder.clearCallingIdentity();
+            try {
+                return createVirtualDisplayInternal(appToken, callingUid, packageName,
+                        name, width, height, densityDpi, surface, flags);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void setVirtualDisplaySurface(IBinder appToken, Surface surface) {
+            final long token = Binder.clearCallingIdentity();
+            try {
+                setVirtualDisplaySurfaceInternal(appToken, surface);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void releaseVirtualDisplay(IBinder appToken) {
+            final long token = Binder.clearCallingIdentity();
+            try {
+                releaseVirtualDisplayInternal(appToken);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        @Override // Binder call
+        public void dump(FileDescriptor fd, final PrintWriter pw, String[] args) {
+            if (mContext == null
+                    || mContext.checkCallingOrSelfPermission(Manifest.permission.DUMP)
+                            != PackageManager.PERMISSION_GRANTED) {
+                pw.println("Permission Denial: can't dump DisplayManager from from pid="
+                        + Binder.getCallingPid() + ", uid=" + Binder.getCallingUid());
+                return;
+            }
+
+            final long token = Binder.clearCallingIdentity();
+            try {
+                dumpInternal(pw);
+            } finally {
+                Binder.restoreCallingIdentity(token);
+            }
+        }
+
+        private boolean validatePackageName(int uid, String packageName) {
+            if (packageName != null) {
+                String[] packageNames = mContext.getPackageManager().getPackagesForUid(uid);
+                if (packageNames != null) {
+                    for (String n : packageNames) {
+                        if (n.equals(packageName)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    private final class LocalService extends DisplayManagerInternal {
+        @Override
+        public void initPowerManagement(final DisplayPowerCallbacks callbacks, Handler handler,
+                SensorManager sensorManager) {
+            synchronized (mSyncRoot) {
+                DisplayBlanker blanker = new DisplayBlanker() {
+                    @Override
+                    public void requestDisplayState(int state) {
+                        // The order of operations is important for legacy reasons.
+                        if (state == Display.STATE_OFF) {
+                            requestGlobalDisplayStateInternal(state);
+                        }
+
+                        callbacks.onDisplayStateChange(state);
+
+                        if (state != Display.STATE_OFF) {
+                            requestGlobalDisplayStateInternal(state);
+                        }
+                    }
+                };
+                mDisplayPowerController = new DisplayPowerController(
+                        mContext, callbacks, handler, sensorManager, blanker);
+            }
+        }
+
+        @Override
+        public boolean requestPowerState(DisplayPowerRequest request,
+                boolean waitForNegativeProximity) {
+            return mDisplayPowerController.requestPowerState(request,
+                    waitForNegativeProximity);
+        }
+
+        @Override
+        public boolean isProximitySensorAvailable() {
+            return mDisplayPowerController.isProximitySensorAvailable();
+        }
+
+        @Override
+        public DisplayInfo getDisplayInfo(int displayId) {
+            return getDisplayInfoInternal(displayId, Process.myUid());
+        }
+
+        @Override
+        public void registerDisplayTransactionListener(DisplayTransactionListener listener) {
+            if (listener == null) {
+                throw new IllegalArgumentException("listener must not be null");
+            }
+
+            registerDisplayTransactionListenerInternal(listener);
+        }
+
+        @Override
+        public void unregisterDisplayTransactionListener(DisplayTransactionListener listener) {
+            if (listener == null) {
+                throw new IllegalArgumentException("listener must not be null");
+            }
+
+            unregisterDisplayTransactionListenerInternal(listener);
+        }
+
+        @Override
+        public void setDisplayInfoOverrideFromWindowManager(int displayId, DisplayInfo info) {
+            setDisplayInfoOverrideFromWindowManagerInternal(displayId, info);
+        }
+
+        @Override
+        public void performTraversalInTransactionFromWindowManager() {
+            performTraversalInTransactionFromWindowManagerInternal();
+        }
+
+        @Override
+        public void setDisplayHasContent(int displayId, boolean hasContent, boolean inTraversal) {
+            setDisplayHasContentInternal(displayId, hasContent, inTraversal);
         }
     }
 }

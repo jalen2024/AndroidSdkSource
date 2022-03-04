@@ -128,6 +128,25 @@ final class ApplicationPackageManager extends PackageManager {
         return intent;
     }
 
+    /** @hide */
+    @Override
+    public Intent getLeanbackLaunchIntentForPackage(String packageName) {
+        // Try to find a main leanback_launcher activity.
+        Intent intentToResolve = new Intent(Intent.ACTION_MAIN);
+        intentToResolve.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+        intentToResolve.setPackage(packageName);
+        List<ResolveInfo> ris = queryIntentActivities(intentToResolve, 0);
+
+        if (ris == null || ris.size() <= 0) {
+            return null;
+        }
+        Intent intent = new Intent(intentToResolve);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        intent.setClassName(ris.get(0).activityInfo.packageName,
+                ris.get(0).activityInfo.name);
+        return intent;
+    }
+
     @Override
     public int[] getPackageGids(String packageName)
             throws NameNotFoundException {
@@ -726,6 +745,39 @@ final class ApplicationPackageManager extends PackageManager {
     @Override public Drawable getApplicationIcon(String packageName)
             throws NameNotFoundException {
         return getApplicationIcon(getApplicationInfo(packageName, 0));
+    }
+
+    @Override
+    public Drawable getActivityBanner(ComponentName activityName)
+            throws NameNotFoundException {
+        return getActivityInfo(activityName, 0).loadBanner(this);
+    }
+
+    @Override
+    public Drawable getActivityBanner(Intent intent)
+            throws NameNotFoundException {
+        if (intent.getComponent() != null) {
+            return getActivityBanner(intent.getComponent());
+        }
+
+        ResolveInfo info = resolveActivity(
+                intent, PackageManager.MATCH_DEFAULT_ONLY);
+        if (info != null) {
+            return info.activityInfo.loadBanner(this);
+        }
+
+        throw new NameNotFoundException(intent.toUri(0));
+    }
+
+    @Override
+    public Drawable getApplicationBanner(ApplicationInfo info) {
+        return info.loadBanner(this);
+    }
+
+    @Override
+    public Drawable getApplicationBanner(String packageName)
+            throws NameNotFoundException {
+        return getApplicationBanner(getApplicationInfo(packageName, 0));
     }
 
     @Override

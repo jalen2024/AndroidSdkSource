@@ -16,6 +16,7 @@
 
 package com.android.server.display;
 
+import android.hardware.display.DisplayViewport;
 import android.util.DisplayMetrics;
 import android.view.Display;
 import android.view.Surface;
@@ -63,6 +64,7 @@ final class DisplayDeviceInfo {
     /**
      * Flag: Indicates that the display device is owned by a particular application
      * and that no other application should be able to interact with it.
+     * Should typically be used together with {@link #FLAG_OWN_CONTENT_ONLY}.
      */
     public static final int FLAG_PRIVATE = 1 << 4;
 
@@ -76,6 +78,12 @@ final class DisplayDeviceInfo {
      * Flag: Indicates that the display is suitable for presentations.
      */
     public static final int FLAG_PRESENTATION = 1 << 6;
+
+    /**
+     * Flag: Only show this display's own content; do not mirror
+     * the content of another display.
+     */
+    public static final int FLAG_OWN_CONTENT_ONLY = 1 << 7;
 
     /**
      * Touch attachment: Display does not receive touch.
@@ -168,6 +176,11 @@ final class DisplayDeviceInfo {
     public String address;
 
     /**
+     * Display state.
+     */
+    public int state = Display.STATE_ON;
+
+    /**
      * The UID of the application that owns this display, or zero if it is owned by the system.
      * <p>
      * If the display is private, then only the owner can use it.
@@ -211,6 +224,7 @@ final class DisplayDeviceInfo {
                 && rotation == other.rotation
                 && type == other.type
                 && Objects.equal(address, other.address)
+                && state == other.state
                 && ownerUid == other.ownerUid
                 && Objects.equal(ownerPackageName, other.ownerPackageName);
     }
@@ -233,6 +247,7 @@ final class DisplayDeviceInfo {
         rotation = other.rotation;
         type = other.type;
         address = other.address;
+        state = other.state;
         ownerUid = other.ownerUid;
         ownerPackageName = other.ownerPackageName;
     }
@@ -252,6 +267,7 @@ final class DisplayDeviceInfo {
         if (address != null) {
             sb.append(", address ").append(address);
         }
+        sb.append(", state ").append(Display.stateToString(state));
         if (ownerUid != 0 || ownerPackageName != null) {
             sb.append(", owner ").append(ownerPackageName);
             sb.append(" (uid ").append(ownerUid).append(")");
@@ -296,6 +312,9 @@ final class DisplayDeviceInfo {
         }
         if ((flags & FLAG_PRESENTATION) != 0) {
             msg.append(", FLAG_PRESENTATION");
+        }
+        if ((flags & FLAG_OWN_CONTENT_ONLY) != 0) {
+            msg.append(", FLAG_OWN_CONTENT_ONLY");
         }
         return msg.toString();
     }

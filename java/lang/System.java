@@ -55,7 +55,6 @@ import libcore.io.ErrnoException;
 import libcore.io.Libcore;
 import libcore.io.StructPasswd;
 import libcore.io.StructUtsname;
-import libcore.util.ZoneInfoDB;
 
 /**
  * Provides access to system-related information and resources including
@@ -83,12 +82,15 @@ public final class System {
     public static final PrintStream err;
 
     private static final String lineSeparator;
+    private static final Properties unchangeableSystemProperties;
     private static Properties systemProperties;
 
     static {
         err = new PrintStream(new FileOutputStream(FileDescriptor.err));
         out = new PrintStream(new FileOutputStream(FileDescriptor.out));
         in = new BufferedInputStream(new FileInputStream(FileDescriptor.in));
+        unchangeableSystemProperties = initUnchangeableSystemProperties();
+        systemProperties = createSystemProperties();
         lineSeparator = System.getProperty("line.separator");
     }
 
@@ -154,6 +156,59 @@ public final class System {
      *            the number of elements to be copied.
      */
     public static native void arraycopy(Object src, int srcPos, Object dst, int dstPos, int length);
+
+    /**
+     * The char array length threshold below which to use a Java
+     * (non-native) version of arraycopy() instead of the native
+     * version. See b/7103825.
+     */
+    private static final int ARRAYCOPY_SHORT_CHAR_ARRAY_THRESHOLD = 64;
+
+    /**
+     * The char[] specialized version of arraycopy().
+     *
+     * @hide internal use only
+     */
+    public static void arraycopy(char[] src, int srcPos, char[] dst, int dstPos, int length) {
+        if (src == null) {
+            throw new NullPointerException("src == null");
+        }
+        if (dst == null) {
+            throw new NullPointerException("dst == null");
+        }
+        if (srcPos < 0 || dstPos < 0 || length < 0 ||
+            srcPos > src.length - length || dstPos > dst.length - length) {
+            throw new ArrayIndexOutOfBoundsException(
+                "src.length=" + src.length + " srcPos=" + srcPos +
+                " dst.length=" + dst.length + " dstPos=" + dstPos + " length=" + length);
+        }
+        if (length <= ARRAYCOPY_SHORT_CHAR_ARRAY_THRESHOLD) {
+            // Copy char by char for shorter arrays.
+            if (src == dst && srcPos < dstPos && dstPos < srcPos + length) {
+                // Copy backward (to avoid overwriting elements before
+                // they are copied in case of an overlap on the same
+                // array.)
+                for (int i = length - 1; i >= 0; --i) {
+                    dst[dstPos + i] = src[srcPos + i];
+                }
+            } else {
+                // Copy forward.
+                for (int i = 0; i < length; ++i) {
+                    dst[dstPos + i] = src[srcPos + i];
+                }
+            }
+        } else {
+            // Call the native version for longer arrays.
+            arraycopyCharUnchecked(src, srcPos, dst, dstPos, length);
+        }
+    }
+
+    /**
+     * The char[] specialized, unchecked, native version of
+     * arraycopy(). This assumes error checking has been done.
+     */
+    private static native void arraycopyCharUnchecked(char[] src, int srcPos,
+        char[] dst, int dstPos, int length);
 
     /**
      * Returns the current time in milliseconds since January 1, 1970 00:00:00.0 UTC.
@@ -246,13 +301,10 @@ public final class System {
      * @return the system properties.
      */
     public static Properties getProperties() {
-        if (systemProperties == null) {
-            initSystemProperties();
-        }
         return systemProperties;
     }
 
-    private static void initSystemProperties() {
+    private static Properties initUnchangeableSystemProperties() {
         VMRuntime runtime = VMRuntime.getRuntime();
         Properties p = new Properties();
 
@@ -276,10 +328,6 @@ public final class System {
             javaHome = "/system";
         }
         p.put("java.home", javaHome);
-
-        // On Android, each app gets its own temporary directory. This is just a fallback
-        // default, useful only on the host.
-        p.put("java.io.tmpdir", "/tmp");
 
         String ldLibraryPath = getenv("LD_LIBRARY_PATH");
         if (ldLibraryPath != null) {
@@ -333,8 +381,16 @@ public final class System {
 
         // Override built-in properties with settings from the command line.
         parsePropertyAssignments(p, runtime.properties());
+        return p;
+    }
 
-        systemProperties = p;
+    private static Properties createSystemProperties() {
+        Properties p = new PropertiesWithNonOverrideableDefaults(unchangeableSystemProperties);
+        // On Android, each app gets its own temporary directory.
+        // (See android.app.ActivityThread.) This is just a fallback default,
+        // useful only on the host.
+        p.put("java.io.tmpdir", "/tmp");
+        return p;
     }
 
     /**
@@ -360,7 +416,8 @@ public final class System {
      * Returns the value of a particular system property or {@code null} if no
      * such property exists.
      *
-     * <p>The following properties are always provided by the Dalvik VM:
+     * <p>The following properties are always provided by the Dalvik VM <b>and
+     * cannot be modified</b>:
      * <p><table BORDER="1" WIDTH="100%" CELLPADDING="3" CELLSPACING="0" SUMMARY="">
      * <tr BGCOLOR="#CCCCFF" CLASS="TableHeadingColor">
      *     <td><b>Name</b></td>        <td><b>Meaning</b></td>                    <td><b>Example</b></td></tr>
@@ -401,7 +458,8 @@ public final class System {
      *
      * </table>
      *
-     * <p>It is a mistake to try to override any of these. Doing so will have unpredictable results.
+     * <p>It is an error to override anyone of these properties. Any attempt to
+     * do so will leave their values unchanged.
      *
      * @param propertyName
      *            the name of the system property to look up.
@@ -418,22 +476,26 @@ public final class System {
      */
     public static String getProperty(String name, String defaultValue) {
         checkPropertyName(name);
-        return getProperties().getProperty(name, defaultValue);
+        return systemProperties.getProperty(name, defaultValue);
     }
 
     /**
-     * Sets the value of a particular system property.
+     * Sets the value of a particular system property. Most system properties
+     * are read only and cannot be cleared or modified. See {@link #setProperty} for a
+     * list of such properties.
      *
      * @return the old value of the property or {@code null} if the property
      *         didn't exist.
      */
     public static String setProperty(String name, String value) {
         checkPropertyName(name);
-        return (String) getProperties().setProperty(name, value);
+        return (String) systemProperties.setProperty(name, value);
     }
 
     /**
-     * Removes a specific system property.
+     * Removes a specific system property. Most system properties
+     * are read only and cannot be cleared or modified. See {@link #setProperty} for a
+     * list of such properties.
      *
      * @return the property value or {@code null} if the property didn't exist.
      * @throws NullPointerException
@@ -443,7 +505,7 @@ public final class System {
      */
     public static String clearProperty(String name) {
         checkPropertyName(name);
-        return (String) getProperties().remove(name);
+        return (String) systemProperties.remove(name);
     }
 
     private static void checkPropertyName(String name) {
@@ -594,12 +656,18 @@ public final class System {
     }
 
     /**
-     * Sets all system properties. This does not take a copy; the passed-in object is used
-     * directly. Passing null causes the VM to reinitialize the properties to how they were
-     * when the VM was started.
+     * Attempts to set all system properties. Copies all properties from
+     * {@code p} and discards system properties that are read only and cannot
+     * be modified. See {@link #setProperty} for a list of such properties.
      */
     public static void setProperties(Properties p) {
-        systemProperties = p;
+        PropertiesWithNonOverrideableDefaults userProperties =
+                new PropertiesWithNonOverrideableDefaults(unchangeableSystemProperties);
+        if (p != null) {
+            userProperties.putAll(p);
+        }
+
+        systemProperties = userProperties;
     }
 
     /**
@@ -640,6 +708,36 @@ public final class System {
      */
     private static native void setFieldImpl(String fieldName, String signature, Object stream);
 
+    /**
+     * A properties class that prohibits changes to any of the properties
+     * contained in its defaults.
+     */
+    static final class PropertiesWithNonOverrideableDefaults extends Properties {
+        PropertiesWithNonOverrideableDefaults(Properties defaults) {
+            super(defaults);
+        }
+
+        @Override
+        public Object put(Object key, Object value) {
+            if (defaults.containsKey(key)) {
+                logE("Ignoring attempt to set property \"" + key +
+                        "\" to value \"" + value + "\".");
+                return defaults.get(key);
+            }
+
+            return super.put(key, value);
+        }
+
+        @Override
+        public Object remove(Object key) {
+            if (defaults.containsKey(key)) {
+                logE("Ignoring attempt to remove property \"" + key + "\".");
+                return null;
+            }
+
+            return super.remove(key);
+        }
+    }
 
     /**
      * The unmodifiable environment variables map. System.getenv() specifies

@@ -30,6 +30,7 @@ import java.security.NoSuchProviderException;
 import java.security.Provider;
 import java.security.Security;
 import java.security.spec.PSSParameterSpec;
+import java.util.ArrayList;
 import java.util.Arrays;
 
 import javax.crypto.Mac;
@@ -71,7 +72,7 @@ public class MacTest extends TestCase {
     private static String[] validValues = new String[3];
 
     public static final String validAlgorithmsMac [] =
-        {"HmacSHA1", "HmacMD5", "HmacSHA256", "HmacSHA384", "HmacSHA512"};
+        {"HmacSHA1", "HmacMD5", "HmacSHA224", "HmacSHA256", "HmacSHA384", "HmacSHA512"};
 
 
     static {
@@ -90,20 +91,19 @@ public class MacTest extends TestCase {
         }
     }
 
-    private Mac [] createMacs() {
+    private Mac[] createMacs() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return null;
         }
-        try {
-            Mac m [] = new Mac[3];
-            m[0] = Mac.getInstance(defaultAlgorithm);
-            m[1] = Mac.getInstance(defaultAlgorithm, defaultProvider);
-            m[2] = Mac.getInstance(defaultAlgorithm, defaultProviderName);
-            return m;
-        } catch (Exception e) {
-            return null;
+        ArrayList<Mac> macList = new ArrayList<Mac>();
+        macList.add(Mac.getInstance(defaultAlgorithm));
+        macList.add(Mac.getInstance(defaultAlgorithm, defaultProvider));
+        macList.add(Mac.getInstance(defaultAlgorithm, defaultProviderName));
+        for (Provider p : Security.getProviders("Mac." + defaultAlgorithm)) {
+            macList.add(Mac.getInstance(defaultAlgorithm, p));
         }
+        return macList.toArray(new Mac[macList.size()]);
     }
 
     /**
@@ -356,9 +356,7 @@ public class MacTest extends TestCase {
      * throws ShotBufferException when outOffset  is negative or
      * outOffset >= output.length  or when given buffer is small
      */
-    public void testMac10() throws NoSuchAlgorithmException,
-            NoSuchProviderException, IllegalArgumentException,
-            IllegalStateException, InvalidKeyException {
+    public void testMac10() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -404,9 +402,7 @@ public class MacTest extends TestCase {
      * <code>doFinal()</code> methods Assertion: Mac result is stored in
      * output buffer
      */
-    public void testMac11() throws NoSuchAlgorithmException, NoSuchProviderException,
-            IllegalArgumentException, IllegalStateException,
-            InvalidKeyException, ShortBufferException {
+    public void testMac11() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -430,9 +426,7 @@ public class MacTest extends TestCase {
      * Test for <code>doFinal(byte[] input)</code> method
      * Assertion: update Mac and returns result
      */
-    public void testMac12() throws NoSuchAlgorithmException, NoSuchProviderException,
-            IllegalArgumentException, IllegalStateException,
-            InvalidKeyException  {
+    public void testMac12() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -447,15 +441,15 @@ public class MacTest extends TestCase {
             byte[] res1 = macs[i].doFinal();
             byte[] res2 = macs[i].doFinal();
             assertEquals("Results are not the same",
-                    IntegralToString.bytesToHexString(res1, false),
-                    IntegralToString.bytesToHexString(res2, false));
+                    Arrays.toString(res1),
+                    Arrays.toString(res2));
 
             res2 = macs[i].doFinal(upd);
             macs[i].update(upd);
             res1 = macs[i].doFinal();
             assertEquals("Results are not the same",
-                    IntegralToString.bytesToHexString(res1, false),
-                    IntegralToString.bytesToHexString(res2, false));
+                    Arrays.toString(res1),
+                    Arrays.toString(res2));
         }
     }
 
@@ -464,9 +458,7 @@ public class MacTest extends TestCase {
      * Assertion: throws IllegalArgumentException when offset or len is negative,
      * offset + len >= input.length
      */
-    public void testMac13() throws NoSuchAlgorithmException,
-            NoSuchProviderException, IllegalArgumentException, IllegalStateException,
-            InvalidKeyException {
+    public void testMac13() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -505,9 +497,7 @@ public class MacTest extends TestCase {
      * methods
      * Assertion: updates Mac
      */
-    public void testMac14() throws NoSuchAlgorithmException,
-            NoSuchProviderException, IllegalArgumentException, IllegalStateException,
-            InvalidKeyException {
+    public void testMac14() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -547,7 +537,7 @@ public class MacTest extends TestCase {
      * Test for <code>clone()</code> method
      * Assertion: returns Mac object or throws CloneNotSupportedException
      */
-    public void testMacClone() throws NoSuchAlgorithmException, CloneNotSupportedException {
+    public void testMacClone() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -572,9 +562,7 @@ public class MacTest extends TestCase {
      * Assertion: throws InvalidKeyException and InvalidAlgorithmParameterException
      * when parameters are not appropriate
      */
-    public void testInit() throws NoSuchAlgorithmException, NoSuchProviderException,
-            IllegalArgumentException, IllegalStateException, InvalidAlgorithmParameterException,
-            InvalidKeyException {
+    public void testInit() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -588,6 +576,7 @@ public class MacTest extends TestCase {
         SecretKeySpec sks1 = new SecretKeySpec(b, "RSA");
 
         for (int i = 0; i < macs.length; i++) {
+            macs[i].reset();
             macs[i].init(sks);
             try {
                 macs[i].init(sks1, algPSS);
@@ -621,9 +610,7 @@ public class MacTest extends TestCase {
      * methods
      * Assertion: processes Mac; if input is null then do nothing
      */
-    public void testUpdateByteBuffer01() throws NoSuchAlgorithmException, NoSuchProviderException,
-            IllegalArgumentException, IllegalStateException, InvalidAlgorithmParameterException,
-            InvalidKeyException {
+    public void testUpdateByteBuffer01() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -664,9 +651,7 @@ public class MacTest extends TestCase {
      * methods
      * Assertion: processes Mac
      */
-    public void testUpdateByteBuffer02() throws NoSuchAlgorithmException, NoSuchProviderException,
-            IllegalArgumentException, IllegalStateException, InvalidAlgorithmParameterException,
-            InvalidKeyException {
+    public void testUpdateByteBuffer02() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -699,7 +684,7 @@ public class MacTest extends TestCase {
      * Test for <code>clone()</code> method
      * Assertion: clone if provider is clo
      */
-    public void testClone()  {
+    public void testClone() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -720,7 +705,7 @@ public class MacTest extends TestCase {
      * Test for <code>getMacLength()</code> method
      * Assertion: return Mac length
      */
-    public void testGetMacLength() {
+    public void testGetMacLength() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;
@@ -736,7 +721,7 @@ public class MacTest extends TestCase {
      * Test for <code>reset()</code> method
      * Assertion: return Mac length
      */
-    public void testReset() throws InvalidKeyException {
+    public void testReset() throws Exception {
         if (!DEFSupported) {
             fail(NotSupportedMsg);
             return;

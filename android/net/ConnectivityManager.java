@@ -361,11 +361,17 @@ public class ConnectivityManager {
      */
     public static final int TYPE_MOBILE_IA = 14;
 
-    /** {@hide} */
-    public static final int MAX_RADIO_TYPE   = TYPE_MOBILE_IA;
+    /**
+     * The network that uses proxy to achieve connectivity.
+     * {@hide}
+     */
+    public static final int TYPE_PROXY = 16;
 
     /** {@hide} */
-    public static final int MAX_NETWORK_TYPE = TYPE_MOBILE_IA;
+    public static final int MAX_RADIO_TYPE   = TYPE_PROXY;
+
+    /** {@hide} */
+    public static final int MAX_NETWORK_TYPE = TYPE_PROXY;
 
     /**
      * If you want to set the default network preference,you can directly
@@ -394,6 +400,8 @@ public class ConnectivityManager {
     public static final int CONNECTIVITY_CHANGE_DELAY_DEFAULT = 3000;
 
     private final IConnectivityManager mService;
+
+    private final String mPackageName;
 
     /**
      * Tests if a given integer represents a valid network type.
@@ -444,6 +452,8 @@ public class ConnectivityManager {
                 return "WIFI_P2P";
             case TYPE_MOBILE_IA:
                 return "MOBILE_IA";
+            case TYPE_PROXY:
+                return "PROXY";
             default:
                 return Integer.toString(type);
         }
@@ -802,7 +812,7 @@ public class ConnectivityManager {
     public boolean requestRouteToHostAddress(int networkType, InetAddress hostAddress) {
         byte[] address = hostAddress.getAddress();
         try {
-            return mService.requestRouteToHostAddress(networkType, address);
+            return mService.requestRouteToHostAddress(networkType, address, mPackageName);
         } catch (RemoteException e) {
             return false;
         }
@@ -898,8 +908,9 @@ public class ConnectivityManager {
     /**
      * {@hide}
      */
-    public ConnectivityManager(IConnectivityManager service) {
+    public ConnectivityManager(IConnectivityManager service, String packageName) {
         mService = checkNotNull(service, "missing IConnectivityManager");
+        mPackageName = checkNotNull(packageName, "missing package name");
     }
 
     /** {@hide} */

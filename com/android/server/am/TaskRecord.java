@@ -60,8 +60,13 @@ final class TaskRecord extends ThumbnailHolder {
     /** Takes on same set of values as ActivityRecord.mActivityType */
     private int mTaskType;
 
-    /** Launch the home activity when leaving this task. */
+    /** Launch the home activity when leaving this task. Will be false for tasks that are not on
+     * Display.DEFAULT_DISPLAY. */
     boolean mOnTopOfHome = false;
+
+    // Used in the unique case where we are clearing the task in order to reuse it. In that case we
+    // do not want to delete the stack when the task goes empty.
+    boolean mReuseTask = false;
 
     TaskRecord(int _taskId, ActivityInfo info, Intent _intent) {
         taskId = _taskId;
@@ -159,18 +164,33 @@ final class TaskRecord extends ThumbnailHolder {
         return null;
     }
 
+    /** Call after activity movement or finish to make sure that frontOfTask is set correctly */
+    final void setFrontOfTask() {
+        boolean foundFront = false;
+        final int numActivities = mActivities.size();
+        for (int activityNdx = 0; activityNdx < numActivities; ++activityNdx) {
+            final ActivityRecord r = mActivities.get(activityNdx);
+            if (foundFront || r.finishing) {
+                r.frontOfTask = false;
+            } else {
+                r.frontOfTask = true;
+                // Set frontOfTask false for every following activity.
+                foundFront = true;
+            }
+        }
+    }
+
     /**
-     * Reorder the history stack so that the activity at the given index is
-     * brought to the front.
+     * Reorder the history stack so that the passed activity is brought to the front.
      */
     final void moveActivityToFrontLocked(ActivityRecord newTop) {
         if (DEBUG_ADD_REMOVE) Slog.i(TAG, "Removing and adding activity " + newTop
             + " to stack at top", new RuntimeException("here").fillInStackTrace());
 
-        getTopActivity().frontOfTask = false;
         mActivities.remove(newTop);
         mActivities.add(newTop);
-        newTop.frontOfTask = true;
+
+        setFrontOfTask();
     }
 
     void addActivityAtBottom(ActivityRecord r) {
@@ -203,7 +223,7 @@ final class TaskRecord extends ThumbnailHolder {
             // Was previously in list.
             numFullscreen--;
         }
-        return mActivities.size() == 0;
+        return mActivities.size() == 0 && !mReuseTask;
     }
 
     /**
@@ -228,7 +248,9 @@ final class TaskRecord extends ThumbnailHolder {
      * Completely remove all activities associated with an existing task.
      */
     final void performClearTaskLocked() {
+        mReuseTask = true;
         performClearTaskAtIndexLocked(0);
+        mReuseTask = false;
     }
 
     /**

@@ -22,6 +22,7 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.os.IBinder;
+import android.os.RemoteException;
 import android.os.ServiceManager;
 import android.util.Log;
 
@@ -83,6 +84,18 @@ public abstract class NotificationListenerService extends Service {
      */
     public abstract void onNotificationRemoved(StatusBarNotification sbn);
 
+    /**
+     * Implement this method to learn about when the listener is enabled and connected to
+     * the notification manager.  You are safe to call {@link #getActiveNotifications(String[])
+     * at this time.
+     *
+     * @param notificationKeys The notification keys for all currently posted notifications.
+     * @hide
+     */
+    public void onListenerConnected(String[] notificationKeys) {
+        // optional
+    }
+
     private final INotificationManager getNotificationInterface() {
         if (mNoMan == null) {
             mNoMan = INotificationManager.Stub.asInterface(
@@ -112,6 +125,7 @@ public abstract class NotificationListenerService extends Service {
      *     {@link android.app.NotificationManager#notify(String, int, android.app.Notification)}.
      */
     public final void cancelNotification(String pkg, String tag, int id) {
+        if (!isBound()) return;
         try {
             getNotificationInterface().cancelNotificationFromListener(mWrapper, pkg, tag, id);
         } catch (android.os.RemoteException ex) {
@@ -131,8 +145,24 @@ public abstract class NotificationListenerService extends Service {
      * {@see #cancelNotification(String, String, int)}
      */
     public final void cancelAllNotifications() {
+        cancelNotifications(null /*all*/);
+    }
+
+    /**
+     * Inform the notification manager about dismissal of specific notifications.
+     * <p>
+     * Use this if your listener has a user interface that allows the user to dismiss
+     * multiple notifications at once.
+     *
+     * @param keys Notifications to dismiss, or {@code null} to dismiss all.
+     *
+     * {@see #cancelNotification(String, String, int)}
+     * @hide
+     */
+    public final void cancelNotifications(String[] keys) {
+        if (!isBound()) return;
         try {
-            getNotificationInterface().cancelAllNotificationsFromListener(mWrapper);
+            getNotificationInterface().cancelNotificationsFromListener(mWrapper, keys);
         } catch (android.os.RemoteException ex) {
             Log.v(TAG, "Unable to contact notification manager", ex);
         }
@@ -140,13 +170,26 @@ public abstract class NotificationListenerService extends Service {
 
     /**
      * Request the list of outstanding notifications (that is, those that are visible to the
-     * current user). Useful when starting up and you don't know what's already been posted.
+     * current user). Useful when you don't know what's already been posted.
      *
      * @return An array of active notifications.
      */
     public StatusBarNotification[] getActiveNotifications() {
+        return getActiveNotifications(null /*all*/);
+    }
+
+    /**
+     * Request the list of outstanding notifications (that is, those that are visible to the
+     * current user). Useful when you don't know what's already been posted.
+     *
+     * @param keys A specific list of notification keys, or {@code null} for all.
+     * @return An array of active notifications.
+     * @hide
+     */
+    public StatusBarNotification[] getActiveNotifications(String[] keys) {
+        if (!isBound()) return null;
         try {
-            return getNotificationInterface().getActiveNotificationsFromListener(mWrapper);
+            return getNotificationInterface().getActiveNotificationsFromListener(mWrapper, keys);
         } catch (android.os.RemoteException ex) {
             Log.v(TAG, "Unable to contact notification manager", ex);
         }
@@ -161,9 +204,24 @@ public abstract class NotificationListenerService extends Service {
         return mWrapper;
     }
 
+    private boolean isBound() {
+        if (mWrapper == null) {
+            Log.w(TAG, "Notification listener service not yet bound.");
+            return false;
+        }
+        return true;
+    }
+
     private class INotificationListenerWrapper extends INotificationListener.Stub {
         @Override
-        public void onNotificationPosted(StatusBarNotification sbn) {
+        public void onNotificationPosted(IStatusBarNotificationHolder sbnHolder) {
+            StatusBarNotification sbn;
+            try {
+                sbn = sbnHolder.get();
+            } catch (RemoteException e) {
+                Log.w(TAG, "onNotificationPosted: Error receiving StatusBarNotification", e);
+                return;
+            }
             try {
                 NotificationListenerService.this.onNotificationPosted(sbn);
             } catch (Throwable t) {
@@ -171,11 +229,26 @@ public abstract class NotificationListenerService extends Service {
             }
         }
         @Override
-        public void onNotificationRemoved(StatusBarNotification sbn) {
+        public void onNotificationRemoved(IStatusBarNotificationHolder sbnHolder) {
+            StatusBarNotification sbn;
+            try {
+                sbn = sbnHolder.get();
+            } catch (RemoteException e) {
+                Log.w(TAG, "onNotificationRemoved: Error receiving StatusBarNotification", e);
+                return;
+            }
             try {
                 NotificationListenerService.this.onNotificationRemoved(sbn);
             } catch (Throwable t) {
                 Log.w(TAG, "Error running onNotificationRemoved", t);
+            }
+        }
+        @Override
+        public void onListenerConnected(String[] notificationKeys) {
+            try {
+                NotificationListenerService.this.onListenerConnected(notificationKeys);
+            } catch (Throwable t) {
+                Log.w(TAG, "Error running onListenerConnected", t);
             }
         }
     }

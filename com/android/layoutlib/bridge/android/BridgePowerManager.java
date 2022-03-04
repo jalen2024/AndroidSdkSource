@@ -28,7 +28,7 @@ import android.os.WorkSource;
 public class BridgePowerManager implements IPowerManager {
 
     @Override
-    public boolean isScreenOn() throws RemoteException {
+    public boolean isInteractive() throws RemoteException {
         return true;
     }
 
@@ -56,7 +56,7 @@ public class BridgePowerManager implements IPowerManager {
     }
 
     @Override
-    public void goToSleep(long arg0, int arg1) throws RemoteException {
+    public void goToSleep(long arg0, int arg1, int arg2) throws RemoteException {
         // pass for now.
     }
 

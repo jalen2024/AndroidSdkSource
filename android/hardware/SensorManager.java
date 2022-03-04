@@ -321,6 +321,13 @@ public abstract class SensorManager {
 
 
     /**
+      * The values returned by this sensor cannot be trusted because the sensor
+      * had no contact with what it was measuring (for example, the heart rate
+      * monitor is not in contact with the user).
+      */
+    public static final int SENSOR_STATUS_NO_CONTACT = -1;
+
+    /**
      * The values returned by this sensor cannot be trusted, calibration is
      * needed or the environment doesn't allow readings
      */
@@ -421,9 +428,10 @@ public abstract class SensorManager {
      * {@link SensorManager#getSensorList(int) getSensorList}.
      *
      * @param type
-     *        of sensors requested
+     *         of sensors requested
      *
-     * @return the default sensors matching the asked type.
+     * @return the default sensor matching the requested type if one exists and the application
+     *         has the necessary permissions, or null otherwise.
      *
      * @see #getSensorList(int)
      * @see Sensor
@@ -1056,8 +1064,8 @@ public abstract class SensorManager {
      *        is mapped.
      *
      * @param outR
-     *        the transformed rotation matrix. inR and outR can be the same
-     *        array, but it is not recommended for performance reason.
+     *        the transformed rotation matrix. inR and outR should not be the same
+     *        array.
      *
      * @return <code>true</code> on success. <code>false</code> if the input
      *         parameters are incorrect, for instance if X and Y define the same

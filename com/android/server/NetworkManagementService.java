@@ -136,6 +136,7 @@ public class NetworkManagementService extends INetworkManagementService.Stub
         public static final int BandwidthControl          = 601;
         public static final int InterfaceClassActivity    = 613;
         public static final int InterfaceAddressChange    = 614;
+        public static final int InterfaceDnsServerInfo    = 615;
     }
 
     /**
@@ -404,11 +405,11 @@ public class NetworkManagementService extends INetworkManagementService.Stub
     /**
      * Notify our observers of a new or updated interface address.
      */
-    private void notifyAddressUpdated(String address, String iface, int flags, int scope) {
+    private void notifyAddressUpdated(String iface, LinkAddress address) {
         final int length = mObservers.beginBroadcast();
         for (int i = 0; i < length; i++) {
             try {
-                mObservers.getBroadcastItem(i).addressUpdated(address, iface, flags, scope);
+                mObservers.getBroadcastItem(i).addressUpdated(iface, address);
             } catch (RemoteException e) {
             } catch (RuntimeException e) {
             }
@@ -419,11 +420,26 @@ public class NetworkManagementService extends INetworkManagementService.Stub
     /**
      * Notify our observers of a deleted interface address.
      */
-    private void notifyAddressRemoved(String address, String iface, int flags, int scope) {
+    private void notifyAddressRemoved(String iface, LinkAddress address) {
         final int length = mObservers.beginBroadcast();
         for (int i = 0; i < length; i++) {
             try {
-                mObservers.getBroadcastItem(i).addressRemoved(address, iface, flags, scope);
+                mObservers.getBroadcastItem(i).addressRemoved(iface, address);
+            } catch (RemoteException e) {
+            } catch (RuntimeException e) {
+            }
+        }
+        mObservers.finishBroadcast();
+    }
+
+    /**
+     * Notify our observers of DNS server information received.
+     */
+    private void notifyInterfaceDnsServerInfo(String iface, long lifetime, String[] addresses) {
+        final int length = mObservers.beginBroadcast();
+        for (int i = 0; i < length; i++) {
+            try {
+                mObservers.getBroadcastItem(i).interfaceDnsServerInfo(iface, lifetime, addresses);
             } catch (RemoteException e) {
             } catch (RuntimeException e) {
             }
@@ -455,6 +471,7 @@ public class NetworkManagementService extends INetworkManagementService.Stub
 
         @Override
         public boolean onEvent(int code, String raw, String[] cooked) {
+            String errorMessage = String.format("Invalid event from daemon (%s)", raw);
             switch (code) {
             case NetdResponseCode.InterfaceChange:
                     /*
@@ -465,8 +482,7 @@ public class NetworkManagementService extends INetworkManagementService.Stub
                      *         "NNN Iface linkstatus <name> <up/down>"
                      */
                     if (cooked.length < 4 || !cooked[1].equals("Iface")) {
-                        throw new IllegalStateException(
-                                String.format("Invalid event from daemon (%s)", raw));
+                        throw new IllegalStateException(errorMessage);
                     }
                     if (cooked[2].equals("added")) {
                         notifyInterfaceAdded(cooked[3]);
@@ -481,8 +497,7 @@ public class NetworkManagementService extends INetworkManagementService.Stub
                         notifyInterfaceLinkStateChanged(cooked[3], cooked[4].equals("up"));
                         return true;
                     }
-                    throw new IllegalStateException(
-                            String.format("Invalid event from daemon (%s)", raw));
+                    throw new IllegalStateException(errorMessage);
                     // break;
             case NetdResponseCode.BandwidthControl:
                     /*
@@ -490,15 +505,13 @@ public class NetworkManagementService extends INetworkManagementService.Stub
                      * Format: "NNN limit alert <alertName> <ifaceName>"
                      */
                     if (cooked.length < 5 || !cooked[1].equals("limit")) {
-                        throw new IllegalStateException(
-                                String.format("Invalid event from daemon (%s)", raw));
+                        throw new IllegalStateException(errorMessage);
                     }
                     if (cooked[2].equals("alert")) {
                         notifyLimitReached(cooked[3], cooked[4]);
                         return true;
                     }
-                    throw new IllegalStateException(
-                            String.format("Invalid event from daemon (%s)", raw));
+                    throw new IllegalStateException(errorMessage);
                     // break;
             case NetdResponseCode.InterfaceClassActivity:
                     /*
@@ -506,8 +519,7 @@ public class NetworkManagementService extends INetworkManagementService.Stub
                      * Format: "NNN IfaceClass <active/idle> <label>"
                      */
                     if (cooked.length < 4 || !cooked[1].equals("IfaceClass")) {
-                        throw new IllegalStateException(
-                                String.format("Invalid event from daemon (%s)", raw));
+                        throw new IllegalStateException(errorMessage);
                     }
                     boolean isActive = cooked[2].equals("active");
                     notifyInterfaceClassActivity(cooked[3], isActive);
@@ -519,24 +531,46 @@ public class NetworkManagementService extends INetworkManagementService.Stub
                      * Format: "NNN Address updated <addr> <iface> <flags> <scope>"
                      *         "NNN Address removed <addr> <iface> <flags> <scope>"
                      */
-                    String msg = String.format("Invalid event from daemon (%s)", raw);
-                    if (cooked.length < 6 || !cooked[1].equals("Address")) {
-                        throw new IllegalStateException(msg);
+                    if (cooked.length < 7 || !cooked[1].equals("Address")) {
+                        throw new IllegalStateException(errorMessage);
                     }
 
-                    int flags;
-                    int scope;
+                    String iface = cooked[4];
+                    LinkAddress address;
                     try {
-                        flags = Integer.parseInt(cooked[5]);
-                        scope = Integer.parseInt(cooked[6]);
-                    } catch(NumberFormatException e) {
-                        throw new IllegalStateException(msg);
+                        int flags = Integer.parseInt(cooked[5]);
+                        int scope = Integer.parseInt(cooked[6]);
+                        address = new LinkAddress(cooked[3], flags, scope);
+                    } catch(NumberFormatException e) {     // Non-numeric lifetime or scope.
+                        throw new IllegalStateException(errorMessage, e);
+                    } catch(IllegalArgumentException e) {  // Malformed/invalid IP address.
+                        throw new IllegalStateException(errorMessage, e);
                     }
 
                     if (cooked[2].equals("updated")) {
-                        notifyAddressUpdated(cooked[3], cooked[4], flags, scope);
+                        notifyAddressUpdated(iface, address);
                     } else {
-                        notifyAddressRemoved(cooked[3], cooked[4], flags, scope);
+                        notifyAddressRemoved(iface, address);
+                    }
+                    return true;
+                    // break;
+            case NetdResponseCode.InterfaceDnsServerInfo:
+                    /*
+                     * Information about available DNS servers has been received.
+                     * Format: "NNN DnsInfo servers <interface> <lifetime> <servers>"
+                     */
+                    long lifetime;  // Actually a 32-bit unsigned integer.
+
+                    if (cooked.length == 6 &&
+                        cooked[1].equals("DnsInfo") &&
+                        cooked[2].equals("servers")) {
+                        try {
+                            lifetime = Long.parseLong(cooked[4]);
+                        } catch (NumberFormatException e) {
+                            throw new IllegalStateException(errorMessage);
+                        }
+                        String[] servers = cooked[5].split(",");
+                        notifyInterfaceDnsServerInfo(cooked[3], lifetime, servers);
                     }
                     return true;
                     // break;
@@ -1567,10 +1601,10 @@ public class NetworkManagementService extends INetworkManagementService.Stub
     }
 
     @Override
-    public void clearDnsInterfaceForUidRange(int uid_start, int uid_end) {
+    public void clearDnsInterfaceForUidRange(String iface, int uid_start, int uid_end) {
         mContext.enforceCallingOrSelfPermission(CONNECTIVITY_INTERNAL, TAG);
         try {
-            mConnector.execute("resolver", "clearifaceforuidrange", uid_start, uid_end);
+            mConnector.execute("resolver", "clearifaceforuidrange", iface, uid_start, uid_end);
         } catch (NativeDaemonConnectorException e) {
             throw e.rethrowAsParcelableException();
         }

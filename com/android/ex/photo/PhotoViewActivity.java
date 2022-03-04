@@ -25,6 +25,7 @@ import android.content.res.Resources;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.drawable.BitmapDrawable;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -69,7 +70,8 @@ import java.util.Set;
  */
 public class PhotoViewActivity extends ActionBarActivity implements
         LoaderManager.LoaderCallbacks<Cursor>, OnPageChangeListener, OnInterceptTouchListener,
-        OnMenuVisibilityListener, PhotoViewCallbacks {
+        OnMenuVisibilityListener, PhotoViewCallbacks,
+        PhotoViewController.PhotoViewControllerCallbacks {
 
     private final static String TAG = "PhotoViewActivity";
 
@@ -163,6 +165,7 @@ public class PhotoViewActivity extends ActionBarActivity implements
     // text.
     private long mEnterFullScreenDelayTime;
 
+    private PhotoViewController mController;
 
     protected PhotoPagerAdapter createPhotoPagerAdapter(Context context,
             android.support.v4.app.FragmentManager fm, Cursor c, float maxScale) {
@@ -178,6 +181,8 @@ public class PhotoViewActivity extends ActionBarActivity implements
         final ActivityManager mgr = (ActivityManager) getApplicationContext().
                 getSystemService(Activity.ACTIVITY_SERVICE);
         sMemoryClass = mgr.getMemoryClass();
+
+        mController = new PhotoViewController(this);
 
         final Intent intent = getIntent();
         // uri of the photos to view; optional
@@ -242,6 +247,10 @@ public class PhotoViewActivity extends ActionBarActivity implements
                 createPhotoPagerAdapter(this, getSupportFragmentManager(), null, mMaxInitialScale);
         final Resources resources = getResources();
         mRootView = findViewById(R.id.photo_activity_root_view);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
+            mRootView.setOnSystemUiVisibilityChangeListener(
+                    mController.getSystemUiVisibilityChangeListener());
+        }
         mBackground = findViewById(R.id.photo_activity_background);
         mTemporaryImage = (ImageView) findViewById(R.id.photo_activity_temporary_image);
         mViewPager = (PhotoViewPager) findViewById(R.id.photo_view_pager);
@@ -283,7 +292,13 @@ public class PhotoViewActivity extends ActionBarActivity implements
             setActionBarTitles(actionBar);
         }
 
-        setLightsOutMode(mFullScreen);
+        if (!mScaleAnimationEnabled) {
+            setLightsOutMode(mFullScreen);
+        } else {
+            // Keep lights out mode as false. This is to prevent jank cause by concurrent
+            // animations during the enter animation.
+            setLightsOutMode(false);
+        }
     }
 
     @Override
@@ -584,47 +599,7 @@ public class PhotoViewActivity extends ActionBarActivity implements
     }
 
     protected void setLightsOutMode(boolean enabled) {
-        int flags = 0;
-        final int version = Build.VERSION.SDK_INT;
-        final ActionBar actionBar = getSupportActionBar();
-        if (enabled) {
-            if (version >= android.os.Build.VERSION_CODES.JELLY_BEAN) {
-                flags = View.SYSTEM_UI_FLAG_LOW_PROFILE
-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
-                if (!mScaleAnimationEnabled) {
-                    // If we are using the scale animation for intro and exit,
-                    // we can't go into fullscreen mode. The issue is that the
-                    // activity that invoked this will not be in fullscreen, so
-                    // as we transition out, the background activity will be
-                    // temporarily rendered without an actionbar, and the shrinking
-                    // photo will not line up properly. After that it redraws
-                    // in the correct location, but it still looks janks.
-                    // FLAG: there may be a better way to fix this, but I don't
-                    // yet know what it is.
-                    flags |= View.SYSTEM_UI_FLAG_FULLSCREEN;
-                }
-            } else if (version >= android.os.Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
-                flags = View.SYSTEM_UI_FLAG_LOW_PROFILE;
-            } else if (version >= android.os.Build.VERSION_CODES.HONEYCOMB) {
-                flags = View.STATUS_BAR_HIDDEN;
-            }
-            actionBar.hide();
-        } else {
-            if (version >= android.os.Build.VERSION_CODES.JELLY_BEAN) {
-                flags = View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
-            } else if (version >= android.os.Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
-                flags = View.SYSTEM_UI_FLAG_VISIBLE;
-            } else if (version >= android.os.Build.VERSION_CODES.HONEYCOMB) {
-                flags = View.STATUS_BAR_VISIBLE;
-            }
-            actionBar.show();
-        }
-
-        if (version >= Build.VERSION_CODES.HONEYCOMB) {
-            mRootView.setSystemUiVisibility(flags);
-        }
+        mController.setImmersiveMode(enabled);
     }
 
     private final Runnable mEnterFullScreenRunnable = new Runnable() {
@@ -787,6 +762,7 @@ public class PhotoViewActivity extends ActionBarActivity implements
     public void onEnterAnimationComplete() {
         mEnterAnimationFinished = true;
         mViewPager.setVisibility(View.VISIBLE);
+        setLightsOutMode(mFullScreen);
     }
 
     private void onExitAnimationComplete() {
@@ -986,13 +962,13 @@ public class PhotoViewActivity extends ActionBarActivity implements
         return start - scaleFromEdge - blankSize;
     }
 
-    private void initTemporaryImage(Bitmap bitmap) {
+    private void initTemporaryImage(Drawable drawable) {
         if (mEnterAnimationFinished) {
             // Forget this, we've already run the animation.
             return;
         }
-        mTemporaryImage.setImageBitmap(bitmap);
-        if (bitmap != null) {
+        mTemporaryImage.setImageDrawable(drawable);
+        if (drawable != null) {
             // We have not yet run the enter animation. Start it now.
             int totalWidth = mRootView.getMeasuredWidth();
             if (totalWidth == 0) {
@@ -1022,6 +998,40 @@ public class PhotoViewActivity extends ActionBarActivity implements
         getSupportLoaderManager().initLoader(LOADER_PHOTO_LIST, null, this);
     }
 
+    // START PhotoViewControllerCallbacks
+
+    @Override
+    public void showActionBar() {
+        getSupportActionBar().show();
+    }
+
+    @Override
+    public void hideActionBar() {
+        getSupportActionBar().hide();
+    }
+
+    @Override
+    public boolean isScaleAnimationEnabled() {
+        return mScaleAnimationEnabled;
+    }
+
+    @Override
+    public boolean isEnterAnimationFinished() {
+        return mEnterAnimationFinished;
+    }
+
+    @Override
+    public View getRootView() {
+        return mRootView;
+    }
+
+    @Override
+    public void setNotFullscreenCallbackDoNotUseThisFunction() {
+        setFullScreen(false /* fullscreen */, true /* setDelayedRunnable */);
+    }
+
+    // END PhotoViewControllerCallbacks
+
     private class BitmapCallback implements LoaderManager.LoaderCallbacks<BitmapResult> {
 
         @Override
@@ -1040,23 +1050,22 @@ public class PhotoViewActivity extends ActionBarActivity implements
 
         @Override
         public void onLoadFinished(Loader<BitmapResult> loader, BitmapResult result) {
-            Bitmap bitmap = result.bitmap;
+            Drawable drawable = result.getDrawable(getResources());
             final ActionBar actionBar = getSupportActionBar();
             switch (loader.getId()) {
                 case PhotoViewCallbacks.BITMAP_LOADER_THUMBNAIL:
                     // We just loaded the initial thumbnail that we can display
                     // while waiting for the full viewPager to get initialized.
-                    initTemporaryImage(bitmap);
+                    initTemporaryImage(drawable);
                     // Destroy the loader so we don't attempt to load the thumbnail
                     // again on screen rotations.
                     getSupportLoaderManager().destroyLoader(
                             PhotoViewCallbacks.BITMAP_LOADER_THUMBNAIL);
                     break;
                 case PhotoViewCallbacks.BITMAP_LOADER_AVATAR:
-                    if (bitmap == null) {
+                    if (drawable == null) {
                         actionBar.setLogo(null);
                     } else {
-                        BitmapDrawable drawable = new BitmapDrawable(getResources(), bitmap);
                         actionBar.setLogo(drawable);
                     }
                     break;

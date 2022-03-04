@@ -26,8 +26,6 @@ import android.util.Slog;
 import android.util.TypedValue;
 import com.android.server.EventLogTags;
 
-import static com.android.server.am.ActivityStackSupervisor.HOME_STACK_ID;
-
 import java.io.PrintWriter;
 import java.util.ArrayList;
 
@@ -43,23 +41,29 @@ public class TaskStack {
     private final WindowManagerService mService;
 
     /** The display this stack sits under. */
-    private final DisplayContent mDisplayContent;
+    private DisplayContent mDisplayContent;
 
     /** The Tasks that define this stack. Oldest Tasks are at the bottom. The ordering must match
      * mTaskHistory in the ActivityStack with the same mStackId */
     private final ArrayList<Task> mTasks = new ArrayList<Task>();
 
-    /** The StackBox this sits in. */
-    StackBox mStackBox;
+    /** For comparison with DisplayContent bounds. */
+    private Rect mTmpRect = new Rect();
+
+    /** Content limits relative to the DisplayContent this sits in. */
+    private Rect mBounds = new Rect();
+
+    /** Whether mBounds is fullscreen */
+    private boolean mFullscreen = true;
 
     /** Used to support {@link android.view.WindowManager.LayoutParams#FLAG_DIM_BEHIND} */
-    final DimLayer mDimLayer;
+    private DimLayer mDimLayer;
 
     /** The particular window with FLAG_DIM_BEHIND set. If null, hide mDimLayer. */
     WindowStateAnimator mDimWinAnimator;
 
     /** Support for non-zero {@link android.view.animation.Animation#getBackgroundColor()} */
-    final DimLayer mAnimationBackgroundSurface;
+    DimLayer mAnimationBackgroundSurface;
 
     /** The particular window with an Animation with non-zero background color. */
     WindowStateAnimator mAnimationBackgroundAnimator;
@@ -68,12 +72,18 @@ public class TaskStack {
      * then stop any dimming. */
     boolean mDimmingTag;
 
-    TaskStack(WindowManagerService service, int stackId, DisplayContent displayContent) {
+    /** Application tokens that are exiting, but still on screen for animations. */
+    final AppTokenList mExitingAppTokens = new AppTokenList();
+
+    /** Detach this stack from its display when animation completes. */
+    boolean mDeferDetach;
+
+    TaskStack(WindowManagerService service, int stackId) {
         mService = service;
         mStackId = stackId;
-        mDisplayContent = displayContent;
-        mDimLayer = new DimLayer(service, this);
-        mAnimationBackgroundSurface = new DimLayer(service, this);
+        // TODO: remove bounds from log, they are always 0.
+        EventLog.writeEvent(EventLogTags.WM_STACK_CREATED, stackId, mBounds.left, mBounds.top,
+                mBounds.right, mBounds.bottom);
     }
 
     DisplayContent getDisplayContent() {
@@ -84,12 +94,74 @@ public class TaskStack {
         return mTasks;
     }
 
-    boolean isHomeStack() {
-        return mStackId == HOME_STACK_ID;
+    void resizeWindows() {
+        final boolean underStatusBar = mBounds.top == 0;
+
+        final ArrayList<WindowState> resizingWindows = mService.mResizingWindows;
+        for (int taskNdx = mTasks.size() - 1; taskNdx >= 0; --taskNdx) {
+            final ArrayList<AppWindowToken> activities = mTasks.get(taskNdx).mAppTokens;
+            for (int activityNdx = activities.size() - 1; activityNdx >= 0; --activityNdx) {
+                final ArrayList<WindowState> windows = activities.get(activityNdx).allAppWindows;
+                for (int winNdx = windows.size() - 1; winNdx >= 0; --winNdx) {
+                    final WindowState win = windows.get(winNdx);
+                    if (!resizingWindows.contains(win)) {
+                        if (WindowManagerService.DEBUG_RESIZE) Slog.d(TAG,
+                                "setBounds: Resizing " + win);
+                        resizingWindows.add(win);
+                    }
+                    win.mUnderStatusBar = underStatusBar;
+                }
+            }
+        }
     }
 
-    boolean hasSibling() {
-        return mStackBox.mParent != null;
+    boolean setBounds(Rect bounds) {
+        boolean oldFullscreen = mFullscreen;
+        if (mDisplayContent != null) {
+            mDisplayContent.getLogicalDisplayRect(mTmpRect);
+            mFullscreen = mTmpRect.equals(bounds);
+        }
+
+        if (mBounds.equals(bounds) && oldFullscreen == mFullscreen) {
+            return false;
+        }
+
+        mDimLayer.setBounds(bounds);
+        mAnimationBackgroundSurface.setBounds(bounds);
+        mBounds.set(bounds);
+
+        return true;
+    }
+
+    void getBounds(Rect out) {
+        out.set(mBounds);
+    }
+
+    void updateDisplayInfo() {
+        if (mFullscreen && mDisplayContent != null) {
+            mDisplayContent.getLogicalDisplayRect(mTmpRect);
+            setBounds(mTmpRect);
+        }
+    }
+
+    boolean isFullscreen() {
+        return mFullscreen;
+    }
+
+    boolean isAnimating() {
+        for (int taskNdx = mTasks.size() - 1; taskNdx >= 0; --taskNdx) {
+            final ArrayList<AppWindowToken> activities = mTasks.get(taskNdx).mAppTokens;
+            for (int activityNdx = activities.size() - 1; activityNdx >= 0; --activityNdx) {
+                final ArrayList<WindowState> windows = activities.get(activityNdx).allAppWindows;
+                for (int winNdx = windows.size() - 1; winNdx >= 0; --winNdx) {
+                    final WindowStateAnimator winAnimator = windows.get(winNdx).mWinAnimator;
+                    if (winAnimator.isAnimating() && !winAnimator.isDummyAnimation()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -97,9 +169,7 @@ public class TaskStack {
      * @param task The task to add.
      * @param toTop Whether to add it to the top or bottom.
      */
-    boolean addTask(Task task, boolean toTop) {
-        mStackBox.makeDirty();
-
+    void addTask(Task task, boolean toTop) {
         int stackNdx;
         if (!toTop) {
             stackNdx = 0;
@@ -121,40 +191,73 @@ public class TaskStack {
         mTasks.add(stackNdx, task);
 
         task.mStack = this;
-        mDisplayContent.addTask(task, toTop);
-        return mDisplayContent.moveHomeStackBox(mStackId == HOME_STACK_ID);
+        mDisplayContent.moveStack(this, true);
+        EventLog.writeEvent(EventLogTags.WM_TASK_MOVED, task.taskId, toTop ? 1 : 0, stackNdx);
     }
 
-    boolean moveTaskToTop(Task task) {
+    void moveTaskToTop(Task task) {
         if (DEBUG_TASK_MOVEMENT) Slog.d(TAG, "moveTaskToTop: task=" + task + " Callers="
                 + Debug.getCallers(6));
         mTasks.remove(task);
-        return addTask(task, true);
+        addTask(task, true);
     }
 
-    boolean moveTaskToBottom(Task task) {
+    void moveTaskToBottom(Task task) {
         if (DEBUG_TASK_MOVEMENT) Slog.d(TAG, "moveTaskToBottom: task=" + task);
         mTasks.remove(task);
-        return addTask(task, false);
+        addTask(task, false);
     }
 
     /**
-     * Delete a Task from this stack. If it is the last Task in the stack, remove this stack from
-     * its parent StackBox and merge the parent.
+     * Delete a Task from this stack. If it is the last Task in the stack, move this stack to the
+     * back.
      * @param task The Task to delete.
      */
     void removeTask(Task task) {
         if (DEBUG_TASK_MOVEMENT) Slog.d(TAG, "removeTask: task=" + task);
-        mStackBox.makeDirty();
         mTasks.remove(task);
-        mDisplayContent.removeTask(task);
+        if (mDisplayContent != null) {
+            if (mTasks.isEmpty()) {
+                mDisplayContent.moveStack(this, false);
+            }
+            mDisplayContent.layoutNeeded = true;
+        }
     }
 
-    int remove() {
-        mAnimationBackgroundSurface.destroySurface();
-        mDimLayer.destroySurface();
+    void attachDisplayContent(DisplayContent displayContent) {
+        if (mDisplayContent != null) {
+            throw new IllegalStateException("attachDisplayContent: Already attached");
+        }
+
+        mDisplayContent = displayContent;
+        mDimLayer = new DimLayer(mService, this, displayContent);
+        mAnimationBackgroundSurface = new DimLayer(mService, this, displayContent);
+        updateDisplayInfo();
+    }
+
+    void detachDisplay() {
         EventLog.writeEvent(EventLogTags.WM_STACK_REMOVED, mStackId);
-        return mStackBox.remove();
+
+        boolean doAnotherLayoutPass = false;
+        for (int taskNdx = mTasks.size() - 1; taskNdx >= 0; --taskNdx) {
+            final AppTokenList appWindowTokens = mTasks.get(taskNdx).mAppTokens;
+            for (int appNdx = appWindowTokens.size() - 1; appNdx >= 0; --appNdx) {
+                final WindowList appWindows = appWindowTokens.get(appNdx).allAppWindows;
+                for (int winNdx = appWindows.size() - 1; winNdx >= 0; --winNdx) {
+                    mService.removeWindowInnerLocked(null, appWindows.get(winNdx));
+                    doAnotherLayoutPass = true;
+                }
+            }
+        }
+        if (doAnotherLayoutPass) {
+            mService.requestTraversalLocked();
+        }
+
+        mAnimationBackgroundSurface.destroySurface();
+        mAnimationBackgroundSurface = null;
+        mDimLayer.destroySurface();
+        mDimLayer = null;
+        mDisplayContent = null;
     }
 
     void resetAnimationBackgroundAnimator() {
@@ -259,28 +362,6 @@ public class TaskStack {
         }
     }
 
-    void setBounds(Rect bounds, boolean underStatusBar) {
-        mDimLayer.setBounds(bounds);
-        mAnimationBackgroundSurface.setBounds(bounds);
-
-        final ArrayList<WindowState> resizingWindows = mService.mResizingWindows;
-        for (int taskNdx = mTasks.size() - 1; taskNdx >= 0; --taskNdx) {
-            final ArrayList<AppWindowToken> activities = mTasks.get(taskNdx).mAppTokens;
-            for (int activityNdx = activities.size() - 1; activityNdx >= 0; --activityNdx) {
-                final ArrayList<WindowState> windows = activities.get(activityNdx).allAppWindows;
-                for (int winNdx = windows.size() - 1; winNdx >= 0; --winNdx) {
-                    final WindowState win = windows.get(winNdx);
-                    if (!resizingWindows.contains(win)) {
-                        if (WindowManagerService.DEBUG_RESIZE) Slog.d(TAG,
-                                "setBounds: Resizing " + win);
-                        resizingWindows.add(win);
-                    }
-                    win.mUnderStatusBar = underStatusBar;
-                }
-            }
-        }
-    }
-
     void switchUser(int userId) {
         int top = mTasks.size();
         for (int taskNdx = 0; taskNdx < top; ++taskNdx) {
@@ -293,8 +374,14 @@ public class TaskStack {
         }
     }
 
+    void close() {
+        mDimLayer.mDimSurface.destroy();
+        mAnimationBackgroundSurface.mDimSurface.destroy();
+    }
+
     public void dump(String prefix, PrintWriter pw) {
         pw.print(prefix); pw.print("mStackId="); pw.println(mStackId);
+        pw.print(prefix); pw.print("mDeferDetach="); pw.println(mDeferDetach);
         for (int taskNdx = 0; taskNdx < mTasks.size(); ++taskNdx) {
             pw.print(prefix); pw.println(mTasks.get(taskNdx));
         }
@@ -306,6 +393,17 @@ public class TaskStack {
             pw.print(prefix); pw.println("mDimLayer:");
             mDimLayer.printTo(prefix, pw);
             pw.print(prefix); pw.print("mDimWinAnimator="); pw.println(mDimWinAnimator);
+        }
+        if (!mExitingAppTokens.isEmpty()) {
+            pw.println();
+            pw.println("  Exiting application tokens:");
+            for (int i=mExitingAppTokens.size()-1; i>=0; i--) {
+                WindowToken token = mExitingAppTokens.get(i);
+                pw.print("  Exiting App #"); pw.print(i);
+                pw.print(' '); pw.print(token);
+                pw.println(':');
+                token.dump(pw, "    ");
+            }
         }
     }
 

@@ -197,10 +197,14 @@ class ZygoteConnection {
 
         try {
             parsedArgs = new Arguments(args);
+            if (parsedArgs.permittedCapabilities != 0 || parsedArgs.effectiveCapabilities != 0) {
+                throw new ZygoteSecurityException("Client may not specify capabilities: " +
+                        "permitted=0x" + Long.toHexString(parsedArgs.permittedCapabilities) +
+                        ", effective=0x" + Long.toHexString(parsedArgs.effectiveCapabilities));
+            }
 
             applyUidSecurityPolicy(parsedArgs, peer, peerSecurityContext);
             applyRlimitSecurityPolicy(parsedArgs, peer, peerSecurityContext);
-            applyCapabilitiesSecurityPolicy(parsedArgs, peer, peerSecurityContext);
             applyInvokeWithSecurityPolicy(parsedArgs, peer, peerSecurityContext);
             applyseInfoSecurityPolicy(parsedArgs, peer, peerSecurityContext);
 
@@ -703,71 +707,6 @@ class ZygoteConnection {
     }
 
     /**
-     * Applies zygote security policy per bug #1042973. A root peer may
-     * spawn an instance with any capabilities. All other uids may spawn
-     * instances with any of the capabilities in the peer's permitted set
-     * but no more.
-     *
-     * @param args non-null; zygote spawner arguments
-     * @param peer non-null; peer credentials
-     * @throws ZygoteSecurityException
-     */
-    private static void applyCapabilitiesSecurityPolicy(
-            Arguments args, Credentials peer, String peerSecurityContext)
-            throws ZygoteSecurityException {
-
-        if (args.permittedCapabilities == 0
-                && args.effectiveCapabilities == 0) {
-            // nothing to check
-            return;
-        }
-
-        boolean allowed = SELinux.checkSELinuxAccess(peerSecurityContext,
-                                                     peerSecurityContext,
-                                                     "zygote",
-                                                     "specifycapabilities");
-        if (!allowed) {
-            throw new ZygoteSecurityException(
-                    "Peer may not specify capabilities");
-        }
-
-        if (peer.getUid() == 0) {
-            // root may specify anything
-            return;
-        }
-
-        long permittedCaps;
-
-        try {
-            permittedCaps = ZygoteInit.capgetPermitted(peer.getPid());
-        } catch (IOException ex) {
-            throw new ZygoteSecurityException(
-                    "Error retrieving peer's capabilities.");
-        }
-
-        /*
-         * Ensure that the client did not specify an effective set larger
-         * than the permitted set. The kernel will enforce this too, but we
-         * do it here to make the following check easier.
-         */
-        if (((~args.permittedCapabilities) & args.effectiveCapabilities) != 0) {
-            throw new ZygoteSecurityException(
-                    "Effective capabilities cannot be superset of "
-                            + " permitted capabilities" );
-        }
-
-        /*
-         * Ensure that the new permitted (and thus the new effective) set is
-         * a subset of the peer process's permitted set
-         */
-
-        if (((~permittedCaps) & args.permittedCapabilities) != 0) {
-            throw new ZygoteSecurityException(
-                    "Peer specified unpermitted capabilities" );
-        }
-    }
-
-    /**
      * Applies zygote security policy.
      * Based on the credentials of the process issuing a zygote command:
      * <ol>
@@ -803,7 +742,7 @@ class ZygoteConnection {
     }
 
     /**
-     * Applies zygote security policy for SEAndroid information.
+     * Applies zygote security policy for SELinux information.
      *
      * @param args non-null; zygote spawner arguments
      * @param peer non-null; peer credentials
@@ -822,7 +761,7 @@ class ZygoteConnection {
         if (!(peerUid == 0 || peerUid == Process.SYSTEM_UID)) {
             // All peers with UID other than root or SYSTEM_UID
             throw new ZygoteSecurityException(
-                    "This UID may not specify SEAndroid info.");
+                    "This UID may not specify SELinux info.");
         }
 
         boolean allowed = SELinux.checkSELinuxAccess(peerSecurityContext,
@@ -831,7 +770,7 @@ class ZygoteConnection {
                                                      "specifyseinfo");
         if (!allowed) {
             throw new ZygoteSecurityException(
-                    "Peer may not specify SEAndroid info");
+                    "Peer may not specify SELinux info");
         }
 
         return;

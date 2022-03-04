@@ -463,13 +463,13 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
     public ViewGroup(Context context, AttributeSet attrs) {
         super(context, attrs);
         initViewGroup();
-        initFromAttributes(context, attrs);
+        initFromAttributes(context, attrs, 0);
     }
 
     public ViewGroup(Context context, AttributeSet attrs, int defStyle) {
         super(context, attrs, defStyle);
         initViewGroup();
-        initFromAttributes(context, attrs);
+        initFromAttributes(context, attrs, defStyle);
     }
 
     private boolean debugDraw() {
@@ -499,9 +499,8 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
         mPersistentDrawingCache = PERSISTENT_SCROLLING_CACHE;
     }
 
-    private void initFromAttributes(Context context, AttributeSet attrs) {
-        TypedArray a = context.obtainStyledAttributes(attrs,
-                R.styleable.ViewGroup);
+    private void initFromAttributes(Context context, AttributeSet attrs, int defStyle) {
+        TypedArray a = context.obtainStyledAttributes(attrs, R.styleable.ViewGroup, defStyle, 0);
 
         final int N = a.getIndexCount();
         for (int i = 0; i < N; i++) {
@@ -4574,6 +4573,7 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
         if (invalidate) {
             invalidateViewProperty(false, false);
         }
+        notifySubtreeAccessibilityStateChangedIfNeeded();
     }
 
     /**
@@ -5430,21 +5430,19 @@ public abstract class ViewGroup extends View implements ViewParent, ViewManager 
         }
     }
 
-
     @Override
-    protected boolean fitSystemWindows(Rect insets) {
-        boolean done = super.fitSystemWindows(insets);
-        if (!done) {
-            final int count = mChildrenCount;
-            final View[] children = mChildren;
+    public WindowInsets dispatchApplyWindowInsets(WindowInsets insets) {
+        insets = super.dispatchApplyWindowInsets(insets);
+        if (!insets.isConsumed()) {
+            final int count = getChildCount();
             for (int i = 0; i < count; i++) {
-                done = children[i].fitSystemWindows(insets);
-                if (done) {
+                insets = getChildAt(i).dispatchApplyWindowInsets(insets);
+                if (insets.isConsumed()) {
                     break;
                 }
             }
         }
-        return done;
+        return insets;
     }
 
     /**

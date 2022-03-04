@@ -1,3 +1,19 @@
+/*
+ * Copyright (C) 2014 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.android.server.am;
 
 import java.io.File;
@@ -19,6 +35,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.IPackageManager;
 import android.content.res.CompatibilityInfo;
 import android.os.Handler;
+import android.os.Looper;
 import android.os.Message;
 import android.os.RemoteException;
 import android.util.AtomicFile;
@@ -41,22 +58,27 @@ public final class CompatModePackages {
 
     private static final int MSG_WRITE = ActivityManagerService.FIRST_COMPAT_MODE_MSG;
 
-    private final Handler mHandler = new Handler() {
-        @Override public void handleMessage(Message msg) {
+    private final CompatHandler mHandler;
+
+    private final class CompatHandler extends Handler {
+        public CompatHandler(Looper looper) {
+            super(looper, null, true);
+        }
+
+        @Override
+        public void handleMessage(Message msg) {
             switch (msg.what) {
                 case MSG_WRITE:
                     saveCompatModes();
-                    break;
-                default:
-                    super.handleMessage(msg);
                     break;
             }
         }
     };
 
-    public CompatModePackages(ActivityManagerService service, File systemDir) {
+    public CompatModePackages(ActivityManagerService service, File systemDir, Handler handler) {
         mService = service;
         mFile = new AtomicFile(new File(systemDir, "packages-compat.xml"));
+        mHandler = new CompatHandler(handler.getLooper());
 
         FileInputStream fis = null;
         try {
@@ -64,9 +86,14 @@ public final class CompatModePackages {
             XmlPullParser parser = Xml.newPullParser();
             parser.setInput(fis, null);
             int eventType = parser.getEventType();
-            while (eventType != XmlPullParser.START_TAG) {
+            while (eventType != XmlPullParser.START_TAG &&
+                    eventType != XmlPullParser.END_DOCUMENT) {
                 eventType = parser.next();
             }
+            if (eventType == XmlPullParser.END_DOCUMENT) {
+                return;
+            }
+
             String tagName = parser.getName();
             if ("compat-packages".equals(tagName)) {
                 eventType = parser.next();

@@ -17,7 +17,6 @@
 package com.android.server;
 
 import android.os.Handler;
-import android.os.HandlerThread;
 
 /**
  * Shared singleton foreground thread for the system.  This is a thread for regular
@@ -27,12 +26,12 @@ import android.os.HandlerThread;
  * simply being a background priority), which can cause operations scheduled on it
  * to be delayed for a user-noticeable amount of time.
  */
-public final class FgThread extends HandlerThread {
+public final class FgThread extends ServiceThread {
     private static FgThread sInstance;
     private static Handler sHandler;
 
     private FgThread() {
-        super("android.fg", android.os.Process.THREAD_PRIORITY_DEFAULT);
+        super("android.fg", android.os.Process.THREAD_PRIORITY_DEFAULT, true /*allowIo*/);
     }
 
     private static void ensureThreadLocked() {
@@ -40,12 +39,6 @@ public final class FgThread extends HandlerThread {
             sInstance = new FgThread();
             sInstance.start();
             sHandler = new Handler(sInstance.getLooper());
-            sHandler.post(new Runnable() {
-                @Override
-                public void run() {
-                    android.os.Process.setCanSelfBackground(false);
-                }
-            });
         }
     }
 

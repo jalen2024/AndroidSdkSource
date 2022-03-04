@@ -38,10 +38,13 @@ import android.util.SparseArray;
 
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
+import java.io.UnsupportedEncodingException;
 import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 
 import com.android.internal.app.IBatteryStats;
@@ -152,25 +155,40 @@ public class NsdService extends INsdManager.Stub {
         class DefaultState extends State {
             @Override
             public boolean processMessage(Message msg) {
+                ClientInfo cInfo = null;
                 switch (msg.what) {
                     case AsyncChannel.CMD_CHANNEL_HALF_CONNECTED:
                         if (msg.arg1 == AsyncChannel.STATUS_SUCCESSFUL) {
                             AsyncChannel c = (AsyncChannel) msg.obj;
                             if (DBG) Slog.d(TAG, "New client listening to asynchronous messages");
                             c.sendMessage(AsyncChannel.CMD_CHANNEL_FULLY_CONNECTED);
-                            ClientInfo cInfo = new ClientInfo(c, msg.replyTo);
+                            cInfo = new ClientInfo(c, msg.replyTo);
                             mClients.put(msg.replyTo, cInfo);
                         } else {
                             Slog.e(TAG, "Client connection failure, error=" + msg.arg1);
                         }
                         break;
                     case AsyncChannel.CMD_CHANNEL_DISCONNECTED:
-                        if (msg.arg1 == AsyncChannel.STATUS_SEND_UNSUCCESSFUL) {
-                            Slog.e(TAG, "Send failed, client connection lost");
-                        } else {
-                            if (DBG) Slog.d(TAG, "Client connection lost with reason: " + msg.arg1);
+                        switch (msg.arg1) {
+                            case AsyncChannel.STATUS_SEND_UNSUCCESSFUL:
+                                Slog.e(TAG, "Send failed, client connection lost");
+                                break;
+                            case AsyncChannel.STATUS_REMOTE_DISCONNECTION:
+                                if (DBG) Slog.d(TAG, "Client disconnected");
+                                break;
+                            default:
+                                if (DBG) Slog.d(TAG, "Client connection lost with reason: " + msg.arg1);
+                                break;
                         }
-                        mClients.remove(msg.replyTo);
+                        cInfo = mClients.get(msg.replyTo);
+                        if (cInfo != null) {
+                            cInfo.expungeAllRequests();
+                            mClients.remove(msg.replyTo);
+                        }
+                        //Last client
+                        if (mClients.size() == 0) {
+                            stopMDnsDaemon();
+                        }
                         break;
                     case AsyncChannel.CMD_CHANNEL_FULL_CONNECTION:
                         AsyncChannel ac = new AsyncChannel();
@@ -248,13 +266,15 @@ public class NsdService extends INsdManager.Stub {
                 return false;
             }
 
-            private void storeRequestMap(int clientId, int globalId, ClientInfo clientInfo) {
+            private void storeRequestMap(int clientId, int globalId, ClientInfo clientInfo, int what) {
                 clientInfo.mClientIds.put(clientId, globalId);
+                clientInfo.mClientRequests.put(clientId, what);
                 mIdToClientInfoMap.put(globalId, clientInfo);
             }
 
             private void removeRequestMap(int clientId, int globalId, ClientInfo clientInfo) {
                 clientInfo.mClientIds.remove(clientId);
+                clientInfo.mClientRequests.remove(clientId);
                 mIdToClientInfoMap.remove(globalId);
             }
 
@@ -274,10 +294,6 @@ public class NsdService extends INsdManager.Stub {
                         result = NOT_HANDLED;
                         break;
                     case AsyncChannel.CMD_CHANNEL_DISCONNECTED:
-                        //Last client
-                        if (mClients.size() == 1) {
-                            stopMDnsDaemon();
-                        }
                         result = NOT_HANDLED;
                         break;
                     case NsdManager.DISABLE:
@@ -301,7 +317,7 @@ public class NsdService extends INsdManager.Stub {
                                 Slog.d(TAG, "Discover " + msg.arg2 + " " + id +
                                         servInfo.getServiceType());
                             }
-                            storeRequestMap(msg.arg2, id, clientInfo);
+                            storeRequestMap(msg.arg2, id, clientInfo, msg.what);
                             replyToMessage(msg, NsdManager.DISCOVER_SERVICES_STARTED, servInfo);
                         } else {
                             stopServiceDiscovery(id);
@@ -340,7 +356,7 @@ public class NsdService extends INsdManager.Stub {
                         id = getUniqueId();
                         if (registerService(id, (NsdServiceInfo) msg.obj)) {
                             if (DBG) Slog.d(TAG, "Register " + msg.arg2 + " " + id);
-                            storeRequestMap(msg.arg2, id, clientInfo);
+                            storeRequestMap(msg.arg2, id, clientInfo, msg.what);
                             // Return success after mDns reports success
                         } else {
                             unregisterService(id);
@@ -381,7 +397,7 @@ public class NsdService extends INsdManager.Stub {
                         id = getUniqueId();
                         if (resolveService(id, servInfo)) {
                             clientInfo.mResolvedService = new NsdServiceInfo();
-                            storeRequestMap(msg.arg2, id, clientInfo);
+                            storeRequestMap(msg.arg2, id, clientInfo, msg.what);
                         } else {
                             replyToMessage(msg, NsdManager.RESOLVE_SERVICE_FAILED,
                                     NsdManager.FAILURE_INTERNAL_ERROR);
@@ -430,14 +446,14 @@ public class NsdService extends INsdManager.Stub {
                     case NativeResponseCode.SERVICE_FOUND:
                         /* NNN uniqueId serviceName regType domain */
                         if (DBG) Slog.d(TAG, "SERVICE_FOUND Raw: " + raw);
-                        servInfo = new NsdServiceInfo(cooked[2], cooked[3], null);
+                        servInfo = new NsdServiceInfo(cooked[2], cooked[3]);
                         clientInfo.mChannel.sendMessage(NsdManager.SERVICE_FOUND, 0,
                                 clientId, servInfo);
                         break;
                     case NativeResponseCode.SERVICE_LOST:
                         /* NNN uniqueId serviceName regType domain */
                         if (DBG) Slog.d(TAG, "SERVICE_LOST Raw: " + raw);
-                        servInfo = new NsdServiceInfo(cooked[2], cooked[3], null);
+                        servInfo = new NsdServiceInfo(cooked[2], cooked[3]);
                         clientInfo.mChannel.sendMessage(NsdManager.SERVICE_LOST, 0,
                                 clientId, servInfo);
                         break;
@@ -450,7 +466,7 @@ public class NsdService extends INsdManager.Stub {
                     case NativeResponseCode.SERVICE_REGISTERED:
                         /* NNN regId serviceName regType */
                         if (DBG) Slog.d(TAG, "SERVICE_REGISTERED Raw: " + raw);
-                        servInfo = new NsdServiceInfo(cooked[2], null, null);
+                        servInfo = new NsdServiceInfo(cooked[2], null);
                         clientInfo.mChannel.sendMessage(NsdManager.REGISTER_SERVICE_SUCCEEDED,
                                 id, clientId, servInfo);
                         break;
@@ -487,7 +503,7 @@ public class NsdService extends INsdManager.Stub {
 
                         int id2 = getUniqueId();
                         if (getAddrInfo(id2, cooked[3])) {
-                            storeRequestMap(clientId, id2, clientInfo);
+                            storeRequestMap(clientId, id2, clientInfo, NsdManager.RESOLVE_SERVICE);
                         } else {
                             clientInfo.mChannel.sendMessage(NsdManager.RESOLVE_SERVICE_FAILED,
                                     NsdManager.FAILURE_INTERNAL_ERROR, clientId);
@@ -666,9 +682,22 @@ public class NsdService extends INsdManager.Stub {
     private boolean registerService(int regId, NsdServiceInfo service) {
         if (DBG) Slog.d(TAG, "registerService: " + regId + " " + service);
         try {
-            //Add txtlen and txtdata
-            mNativeConnector.execute("mdnssd", "register", regId, service.getServiceName(),
+            Command cmd = new Command("mdnssd", "register", regId, service.getServiceName(),
                     service.getServiceType(), service.getPort());
+
+            // Add TXT records as additional arguments.
+            Map<String, byte[]> txtRecords = service.getAttributes();
+            for (String key : txtRecords.keySet()) {
+                try {
+                    // TODO: Send encoded TXT record as bytes once NDC/netd supports binary data.
+                    cmd.appendArg(String.format(Locale.US, "%s=%s", key,
+                            new String(txtRecords.get(key), "UTF_8")));
+                } catch (UnsupportedEncodingException e) {
+                    Slog.e(TAG, "Failed to encode txtRecord " + e);
+                }
+            }
+
+            mNativeConnector.execute(cmd);
         } catch(NativeDaemonConnectorException e) {
             Slog.e(TAG, "Failed to execute registerService " + e);
             return false;
@@ -827,6 +856,9 @@ public class NsdService extends INsdManager.Stub {
         /* A map from client id to unique id sent to mDns */
         private SparseArray<Integer> mClientIds = new SparseArray<Integer>();
 
+        /* A map from client id to the type of the request we had received */
+        private SparseArray<Integer> mClientRequests = new SparseArray<Integer>();
+
         private ClientInfo(AsyncChannel c, Messenger m) {
             mChannel = c;
             mMessenger = m;
@@ -840,10 +872,41 @@ public class NsdService extends INsdManager.Stub {
             sb.append("mMessenger ").append(mMessenger).append("\n");
             sb.append("mResolvedService ").append(mResolvedService).append("\n");
             for(int i = 0; i< mClientIds.size(); i++) {
-                sb.append("clientId ").append(mClientIds.keyAt(i));
-                sb.append(" mDnsId ").append(mClientIds.valueAt(i)).append("\n");
+                int clientID = mClientIds.keyAt(i);
+                sb.append("clientId ").append(clientID).
+                    append(" mDnsId ").append(mClientIds.valueAt(i)).
+                    append(" type ").append(mClientRequests.get(clientID)).append("\n");
             }
             return sb.toString();
         }
+
+        // Remove any pending requests from the global map when we get rid of a client,
+        // and send cancellations to the daemon.
+        private void expungeAllRequests() {
+            int globalId, clientId, i;
+            for (i = 0; i < mClientIds.size(); i++) {
+                clientId = mClientIds.keyAt(i);
+                globalId = mClientIds.valueAt(i);
+                mIdToClientInfoMap.remove(globalId);
+                if (DBG) Slog.d(TAG, "Terminating client-ID " + clientId +
+                        " global-ID " + globalId + " type " + mClientRequests.get(clientId));
+                switch (mClientRequests.get(clientId)) {
+                    case NsdManager.DISCOVER_SERVICES:
+                        stopServiceDiscovery(globalId);
+                        break;
+                    case NsdManager.RESOLVE_SERVICE:
+                        stopResolveService(globalId);
+                        break;
+                    case NsdManager.REGISTER_SERVICE:
+                        unregisterService(globalId);
+                        break;
+                    default:
+                        break;
+                }
+            }
+            mClientIds.clear();
+            mClientRequests.clear();
+        }
+
     }
 }

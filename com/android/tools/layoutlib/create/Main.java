@@ -114,8 +114,14 @@ public class Main {
                         "android.os.*",  // for android.os.Handler
                         "android.database.ContentObserver", // for Digital clock
                         "com.android.i18n.phonenumbers.*",  // for TextView with autolink attribute
+                        "android.app.DatePickerDialog",     // b.android.com/28318
+                        "android.app.TimePickerDialog",     // b.android.com/61515
+                        "com.android.internal.view.menu.ActionMenu",
                     },
-                    excludeClasses);
+                    excludeClasses,
+                    new String[] {
+                        "com/android/i18n/phonenumbers/data/*",
+                    });
             aa.analyze();
             agen.generate();
 

@@ -36,8 +36,11 @@ import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.Region;
 import android.graphics.drawable.Drawable;
+import android.hardware.display.DisplayManager;
+import android.hardware.display.DisplayManager.DisplayListener;
 import android.media.AudioManager;
 import android.os.Binder;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Debug;
 import android.os.Handler;
@@ -117,6 +120,9 @@ public final class ViewRootImpl implements ViewParent,
     private static final String PROPERTY_PROFILE_RENDERING = "viewroot.profile_rendering";
     private static final String PROPERTY_MEDIA_DISABLED = "config.disable_media";
 
+    // property used by emulator to determine display shape
+    private static final String PROPERTY_EMULATOR_CIRCULAR = "ro.emulator.circular";
+
     /**
      * Maximum time we allow the user to roll the trackball enough to generate
      * a key event, before resetting the counters.
@@ -134,6 +140,7 @@ public final class ViewRootImpl implements ViewParent,
     final Context mContext;
     final IWindowSession mWindowSession;
     final Display mDisplay;
+    final DisplayManager mDisplayManager;
     final String mBasePackageName;
 
     final int[] mTmpLocation = new int[2];
@@ -232,8 +239,6 @@ public final class ViewRootImpl implements ViewParent,
     InputStage mFirstInputStage;
     InputStage mFirstPostImeInputStage;
 
-    boolean mFlipControllerFallbackKeys;
-
     boolean mWindowAttributesChanged = false;
     int mWindowAttributesChangesFlag = 0;
 
@@ -321,6 +326,8 @@ public final class ViewRootImpl implements ViewParent,
     /** Set to true once doDie() has been called. */
     private boolean mRemoved;
 
+    private boolean mIsEmulator;
+
     /**
      * Consistency verifier for debugging purposes.
      */
@@ -370,11 +377,7 @@ public final class ViewRootImpl implements ViewParent,
         mNoncompatDensity = context.getResources().getDisplayMetrics().noncompatDensityDpi;
         mFallbackEventHandler = PolicyManager.makeNewFallbackEventHandler(context);
         mChoreographer = Choreographer.getInstance();
-        mFlipControllerFallbackKeys =
-            context.getResources().getBoolean(R.bool.flip_controller_fallback_keys);
-
-        PowerManager powerManager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
-        mAttachInfo.mScreenOn = powerManager.isScreenOn();
+        mDisplayManager = (DisplayManager)context.getSystemService(Context.DISPLAY_SERVICE);
         loadSystemProperties();
     }
 
@@ -429,6 +432,10 @@ public final class ViewRootImpl implements ViewParent,
         synchronized (this) {
             if (mView == null) {
                 mView = view;
+
+                mAttachInfo.mDisplayState = mDisplay.getState();
+                mDisplayManager.registerDisplayListener(mDisplayListener, mHandler);
+
                 mViewLayoutDirectionInitial = mView.getRawLayoutDirection();
                 mFallbackEventHandler.setView(view);
                 mWindowAttributes.copyFrom(attrs);
@@ -798,18 +805,43 @@ public final class ViewRootImpl implements ViewParent,
         scheduleTraversals();
     }
 
-    void handleScreenStateChange(boolean on) {
-        if (on != mAttachInfo.mScreenOn) {
-            mAttachInfo.mScreenOn = on;
-            if (mView != null) {
-                mView.dispatchScreenStateChanged(on ? View.SCREEN_STATE_ON : View.SCREEN_STATE_OFF);
-            }
-            if (on) {
-                mFullRedrawNeeded = true;
-                scheduleTraversals();
+    private final DisplayListener mDisplayListener = new DisplayListener() {
+        @Override
+        public void onDisplayChanged(int displayId) {
+            if (mView != null && mDisplay.getDisplayId() == displayId) {
+                final int oldDisplayState = mAttachInfo.mDisplayState;
+                final int newDisplayState = mDisplay.getState();
+                if (oldDisplayState != newDisplayState) {
+                    mAttachInfo.mDisplayState = newDisplayState;
+                    if (oldDisplayState != Display.STATE_UNKNOWN) {
+                        final int oldScreenState = toViewScreenState(oldDisplayState);
+                        final int newScreenState = toViewScreenState(newDisplayState);
+                        if (oldScreenState != newScreenState) {
+                            mView.dispatchScreenStateChanged(newScreenState);
+                        }
+                        if (oldDisplayState == Display.STATE_OFF) {
+                            // Draw was suppressed so we need to for it to happen here.
+                            mFullRedrawNeeded = true;
+                            scheduleTraversals();
+                        }
+                    }
+                }
             }
         }
-    }
+
+        @Override
+        public void onDisplayRemoved(int displayId) {
+        }
+
+        @Override
+        public void onDisplayAdded(int displayId) {
+        }
+
+        private int toViewScreenState(int displayState) {
+            return displayState == Display.STATE_OFF ?
+                    View.SCREEN_STATE_OFF : View.SCREEN_STATE_ON;
+        }
+    };
 
     @Override
     public void requestFitSystemWindows() {
@@ -1125,6 +1157,20 @@ public final class ViewRootImpl implements ViewParent,
         return windowSizeMayChange;
     }
 
+    void dispatchApplyInsets(View host) {
+        mFitSystemWindowsInsets.set(mAttachInfo.mContentInsets);
+        boolean isRound = false;
+        if ((mWindowAttributes.flags & WindowManager.LayoutParams.FLAG_LAYOUT_IN_OVERSCAN) != 0
+                && mDisplay.getDisplayId() == 0) {
+            // we're fullscreen and not hosted in an ActivityView
+            isRound = (mIsEmulator && SystemProperties.getBoolean(PROPERTY_EMULATOR_CIRCULAR, false))
+                    || mContext.getResources().getBoolean(
+                            com.android.internal.R.bool.config_windowIsRound);
+        }
+        host.dispatchApplyWindowInsets(new WindowInsets(
+                mFitSystemWindowsInsets, isRound));
+    }
+
     private void performTraversals() {
         // cache mView since it is used so much below...
         final View host = mView;
@@ -1216,8 +1262,7 @@ public final class ViewRootImpl implements ViewParent,
             }
             host.dispatchAttachedToWindow(attachInfo, 0);
             attachInfo.mTreeObserver.dispatchOnWindowAttachedChange(true);
-            mFitSystemWindowsInsets.set(mAttachInfo.mContentInsets);
-            host.fitSystemWindows(mFitSystemWindowsInsets);
+            dispatchApplyInsets(host);
             //Log.i(TAG, "Screen on initialized: " + attachInfo.mKeepScreenOn);
 
         } else {
@@ -1342,9 +1387,8 @@ public final class ViewRootImpl implements ViewParent,
 
         if (mFitSystemWindowsRequested) {
             mFitSystemWindowsRequested = false;
-            mFitSystemWindowsInsets.set(mAttachInfo.mContentInsets);
             mLastOverscanRequested = mAttachInfo.mOverscanRequested;
-            host.fitSystemWindows(mFitSystemWindowsInsets);
+            dispatchApplyInsets(host);
             if (mLayoutRequested) {
                 // Short-circuit catching a new layout request here, so
                 // we don't need to go through two layout passes when things
@@ -1523,8 +1567,7 @@ public final class ViewRootImpl implements ViewParent,
                     mLastSystemUiVisibility = mAttachInfo.mSystemUiVisibility;
                     mLastOverscanRequested = mAttachInfo.mOverscanRequested;
                     mFitSystemWindowsRequested = false;
-                    mFitSystemWindowsInsets.set(mAttachInfo.mContentInsets);
-                    host.fitSystemWindows(mFitSystemWindowsInsets);
+                    dispatchApplyInsets(host);
                 }
                 if (visibleInsetsChanged) {
                     mAttachInfo.mVisibleInsets.set(mPendingVisibleInsets);
@@ -2240,7 +2283,7 @@ public final class ViewRootImpl implements ViewParent,
     }
 
     private void performDraw() {
-        if (!mAttachInfo.mScreenOn && !mReportNextDraw) {
+        if (mAttachInfo.mDisplayState == Display.STATE_OFF && !mReportNextDraw) {
             return;
         }
 
@@ -2876,6 +2919,8 @@ public final class ViewRootImpl implements ViewParent,
             mInputChannel = null;
         }
 
+        mDisplayManager.unregisterDisplayListener(mDisplayListener);
+
         unscheduleTraversals();
     }
 
@@ -2912,11 +2957,8 @@ public final class ViewRootImpl implements ViewParent,
                 mView.dispatchConfigurationChanged(config);
             }
         }
-
-        mFlipControllerFallbackKeys =
-            mContext.getResources().getBoolean(R.bool.flip_controller_fallback_keys);
     }
-
+    
     /**
      * Return true if child is an ancestor of parent, (or equal to the parent).
      */
@@ -2958,7 +3000,6 @@ public final class ViewRootImpl implements ViewParent,
     private final static int MSG_DISPATCH_SYSTEM_UI_VISIBILITY = 17;
     private final static int MSG_UPDATE_CONFIGURATION = 18;
     private final static int MSG_PROCESS_INPUT_EVENTS = 19;
-    private final static int MSG_DISPATCH_SCREEN_STATE = 20;
     private final static int MSG_CLEAR_ACCESSIBILITY_FOCUS_HOST = 21;
     private final static int MSG_DISPATCH_DONE_ANIMATING = 22;
     private final static int MSG_INVALIDATE_WORLD = 23;
@@ -3005,8 +3046,6 @@ public final class ViewRootImpl implements ViewParent,
                     return "MSG_UPDATE_CONFIGURATION";
                 case MSG_PROCESS_INPUT_EVENTS:
                     return "MSG_PROCESS_INPUT_EVENTS";
-                case MSG_DISPATCH_SCREEN_STATE:
-                    return "MSG_DISPATCH_SCREEN_STATE";
                 case MSG_CLEAR_ACCESSIBILITY_FOCUS_HOST:
                     return "MSG_CLEAR_ACCESSIBILITY_FOCUS_HOST";
                 case MSG_DISPATCH_DONE_ANIMATING:
@@ -3221,11 +3260,6 @@ public final class ViewRootImpl implements ViewParent,
                     config = mLastConfiguration;
                 }
                 updateConfiguration(config, false);
-            } break;
-            case MSG_DISPATCH_SCREEN_STATE: {
-                if (mView != null) {
-                    handleScreenStateChange(msg.arg1 == 1);
-                }
             } break;
             case MSG_CLEAR_ACCESSIBILITY_FOCUS_HOST: {
                 setAccessibilityFocus(null, null);
@@ -3699,7 +3733,8 @@ public final class ViewRootImpl implements ViewParent,
                     if (result == InputMethodManager.DISPATCH_HANDLED) {
                         return FINISH_HANDLED;
                     } else if (result == InputMethodManager.DISPATCH_NOT_HANDLED) {
-                        return FINISH_NOT_HANDLED;
+                        // The IME could not handle it, so skip along to the next InputStage
+                        return FORWARD;
                     } else {
                         return DEFER; // callback will be invoked later
                     }
@@ -3985,7 +4020,6 @@ public final class ViewRootImpl implements ViewParent,
         private final SyntheticJoystickHandler mJoystick = new SyntheticJoystickHandler();
         private final SyntheticTouchNavigationHandler mTouchNavigation =
                 new SyntheticTouchNavigationHandler();
-        private final SyntheticKeyHandler mKeys = new SyntheticKeyHandler();
 
         public SyntheticInputStage() {
             super(null);
@@ -4008,12 +4042,7 @@ public final class ViewRootImpl implements ViewParent,
                     mTouchNavigation.process(event);
                     return FINISH_HANDLED;
                 }
-            } else if (q.mEvent instanceof KeyEvent) {
-                if (mKeys.process((KeyEvent) q.mEvent)) {
-                    return FINISH_HANDLED;
-                }
             }
-
             return FORWARD;
         }
 
@@ -4332,6 +4361,7 @@ public final class ViewRootImpl implements ViewParent,
      * Creates dpad events from unhandled joystick movements.
      */
     final class SyntheticJoystickHandler extends Handler {
+        private final static String TAG = "SyntheticJoystickHandler";
         private final static int MSG_ENQUEUE_X_AXIS_KEY_REPEAT = 1;
         private final static int MSG_ENQUEUE_Y_AXIS_KEY_REPEAT = 2;
 
@@ -4364,10 +4394,21 @@ public final class ViewRootImpl implements ViewParent,
         }
 
         public void process(MotionEvent event) {
-            update(event, true);
+            switch(event.getActionMasked()) {
+            case MotionEvent.ACTION_CANCEL:
+                cancel(event);
+                break;
+            case MotionEvent.ACTION_MOVE:
+                update(event, true);
+                break;
+            default:
+                Log.w(TAG, "Unexpected action: " + event.getActionMasked());
+            }
         }
 
-        public void cancel(MotionEvent event) {
+        private void cancel(MotionEvent event) {
+            removeMessages(MSG_ENQUEUE_X_AXIS_KEY_REPEAT);
+            removeMessages(MSG_ENQUEUE_Y_AXIS_KEY_REPEAT);
             update(event, false);
         }
 
@@ -4841,63 +4882,6 @@ public final class ViewRootImpl implements ViewParent,
                 }
             }
         };
-    }
-
-    final class SyntheticKeyHandler {
-
-        public boolean process(KeyEvent event) {
-            // In some locales (like Japan) controllers use B for confirm and A for back, rather
-            // than vice versa, so we need to special case this here since the input system itself
-            // is not locale-aware.
-            int keyCode;
-            switch(event.getKeyCode()) {
-                case KeyEvent.KEYCODE_BUTTON_A:
-                case KeyEvent.KEYCODE_BUTTON_C:
-                case KeyEvent.KEYCODE_BUTTON_X:
-                case KeyEvent.KEYCODE_BUTTON_Z:
-                    keyCode = mFlipControllerFallbackKeys ?
-                        KeyEvent.KEYCODE_BACK : KeyEvent.KEYCODE_DPAD_CENTER;
-                    break;
-                case KeyEvent.KEYCODE_BUTTON_B:
-                case KeyEvent.KEYCODE_BUTTON_Y:
-                    keyCode = mFlipControllerFallbackKeys ?
-                        KeyEvent.KEYCODE_DPAD_CENTER : KeyEvent.KEYCODE_BACK;
-                    break;
-                case KeyEvent.KEYCODE_BUTTON_THUMBL:
-                case KeyEvent.KEYCODE_BUTTON_THUMBR:
-                case KeyEvent.KEYCODE_BUTTON_START:
-                case KeyEvent.KEYCODE_BUTTON_1:
-                case KeyEvent.KEYCODE_BUTTON_2:
-                case KeyEvent.KEYCODE_BUTTON_3:
-                case KeyEvent.KEYCODE_BUTTON_4:
-                case KeyEvent.KEYCODE_BUTTON_5:
-                case KeyEvent.KEYCODE_BUTTON_6:
-                case KeyEvent.KEYCODE_BUTTON_7:
-                case KeyEvent.KEYCODE_BUTTON_8:
-                case KeyEvent.KEYCODE_BUTTON_9:
-                case KeyEvent.KEYCODE_BUTTON_10:
-                case KeyEvent.KEYCODE_BUTTON_11:
-                case KeyEvent.KEYCODE_BUTTON_12:
-                case KeyEvent.KEYCODE_BUTTON_13:
-                case KeyEvent.KEYCODE_BUTTON_14:
-                case KeyEvent.KEYCODE_BUTTON_15:
-                case KeyEvent.KEYCODE_BUTTON_16:
-                    keyCode = KeyEvent.KEYCODE_DPAD_CENTER;
-                    break;
-                case KeyEvent.KEYCODE_BUTTON_SELECT:
-                case KeyEvent.KEYCODE_BUTTON_MODE:
-                    keyCode = KeyEvent.KEYCODE_MENU;
-                default:
-                    return false;
-            }
-
-            enqueueInputEvent(new KeyEvent(event.getDownTime(), event.getEventTime(),
-                        event.getAction(), keyCode, event.getRepeatCount(), event.getMetaState(),
-                        event.getDeviceId(), event.getScanCode(),
-                        event.getFlags() | KeyEvent.FLAG_FALLBACK, event.getSource()));
-            return true;
-        }
-
     }
 
     /**
@@ -5401,6 +5385,9 @@ public final class ViewRootImpl implements ViewParent,
                         mHandler.sendEmptyMessageDelayed(MSG_INVALIDATE_WORLD, 200);
                     }
                 }
+
+                // detect emulator
+                mIsEmulator = Build.HARDWARE.contains("goldfish");
             }
         });
     }
@@ -5863,12 +5850,6 @@ public final class ViewRootImpl implements ViewParent,
         mHandler.sendMessage(msg);
     }
 
-    public void dispatchScreenStateChange(boolean on) {
-        Message msg = mHandler.obtainMessage(MSG_DISPATCH_SCREEN_STATE);
-        msg.arg1 = on ? 1 : 0;
-        mHandler.sendMessage(msg);
-    }
-
     public void dispatchGetNewSurface() {
         Message msg = mHandler.obtainMessage(MSG_DISPATCH_GET_NEW_SURFACE);
         mHandler.sendMessage(msg);
@@ -6203,14 +6184,6 @@ public final class ViewRootImpl implements ViewParent,
             final ViewRootImpl viewAncestor = mViewAncestor.get();
             if (viewAncestor != null) {
                 viewAncestor.dispatchAppVisibility(visible);
-            }
-        }
-
-        @Override
-        public void dispatchScreenState(boolean on) {
-            final ViewRootImpl viewAncestor = mViewAncestor.get();
-            if (viewAncestor != null) {
-                viewAncestor.dispatchScreenStateChange(on);
             }
         }
 

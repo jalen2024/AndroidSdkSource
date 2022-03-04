@@ -16,15 +16,19 @@
 
 package com.android.server.power;
 
+import android.app.ActivityManagerInternal;
 import android.app.AppOpsManager;
+
 import com.android.internal.app.IAppOpsService;
 import com.android.internal.app.IBatteryStats;
 import com.android.server.EventLogTags;
+import com.android.server.LocalServices;
 
 import android.app.ActivityManagerNative;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.hardware.input.InputManagerInternal;
 import android.media.AudioManager;
 import android.media.Ringtone;
 import android.media.RingtoneManager;
@@ -81,6 +85,8 @@ final class Notifier {
     private final SuspendBlocker mSuspendBlocker;
     private final ScreenOnBlocker mScreenOnBlocker;
     private final WindowManagerPolicy mPolicy;
+    private final ActivityManagerInternal mActivityManagerInternal;
+    private final InputManagerInternal mInputManagerInternal;
 
     private final NotifierHandler mHandler;
     private final Intent mScreenOnIntent;
@@ -115,6 +121,8 @@ final class Notifier {
         mSuspendBlocker = suspendBlocker;
         mScreenOnBlocker = screenOnBlocker;
         mPolicy = policy;
+        mActivityManagerInternal = LocalServices.getService(ActivityManagerInternal.class);
+        mInputManagerInternal = LocalServices.getService(InputManagerInternal.class);
 
         mHandler = new NotifierHandler(looper);
         mScreenOnIntent = new Intent(Intent.ACTION_SCREEN_ON);
@@ -123,6 +131,11 @@ final class Notifier {
         mScreenOffIntent = new Intent(Intent.ACTION_SCREEN_OFF);
         mScreenOffIntent.addFlags(
                 Intent.FLAG_RECEIVER_REGISTERED_ONLY | Intent.FLAG_RECEIVER_FOREGROUND);
+
+        // Initialize interactive state for battery stats.
+        try {
+            mBatteryStats.noteInteractive(true);
+        } catch (RemoteException ex) { }
     }
 
     /**
@@ -189,119 +202,72 @@ final class Notifier {
     }
 
     /**
-     * Called when the screen is turned on.
+     * Notifies that the device is changing interactive state.
      */
-    public void onScreenOn() {
+    public void onInteractiveStateChangeStarted(boolean interactive, int reason) {
         if (DEBUG) {
-            Slog.d(TAG, "onScreenOn");
-        }
-
-        try {
-            mBatteryStats.noteScreenOn();
-        } catch (RemoteException ex) {
-            // Ignore
-        }
-    }
-
-    /**
-     * Called when the screen is turned off.
-     */
-    public void onScreenOff() {
-        if (DEBUG) {
-            Slog.d(TAG, "onScreenOff");
-        }
-
-        try {
-            mBatteryStats.noteScreenOff();
-        } catch (RemoteException ex) {
-            // Ignore
-        }
-    }
-
-    /**
-     * Called when the screen changes brightness.
-     */
-    public void onScreenBrightness(int brightness) {
-        if (DEBUG) {
-            Slog.d(TAG, "onScreenBrightness: brightness=" + brightness);
-        }
-
-        try {
-            mBatteryStats.noteScreenBrightness(brightness);
-        } catch (RemoteException ex) {
-            // Ignore
-        }
-    }
-
-    /**
-     * Called when the device is waking up from sleep and the
-     * display is about to be turned on.
-     */
-    public void onWakeUpStarted() {
-        if (DEBUG) {
-            Slog.d(TAG, "onWakeUpStarted");
+            Slog.d(TAG, "onInteractiveChangeStarted: interactive=" + interactive
+                    + ", reason=" + reason);
         }
 
         synchronized (mLock) {
-            if (mActualPowerState != POWER_STATE_AWAKE) {
-                mActualPowerState = POWER_STATE_AWAKE;
-                mPendingWakeUpBroadcast = true;
-                if (!mScreenOnBlockerAcquired) {
-                    mScreenOnBlockerAcquired = true;
-                    mScreenOnBlocker.acquire();
+            if (interactive) {
+                // Waking up...
+                if (mActualPowerState != POWER_STATE_AWAKE) {
+                    mActualPowerState = POWER_STATE_AWAKE;
+                    mPendingWakeUpBroadcast = true;
+                    if (!mScreenOnBlockerAcquired) {
+                        mScreenOnBlockerAcquired = true;
+                        mScreenOnBlocker.acquire();
+                    }
+                    updatePendingBroadcastLocked();
                 }
-                updatePendingBroadcastLocked();
+            } else {
+                // Going to sleep...
+                mLastGoToSleepReason = reason;
             }
         }
-    }
 
-    /**
-     * Called when the device has finished waking up from sleep
-     * and the display has been turned on.
-     */
-    public void onWakeUpFinished() {
-        if (DEBUG) {
-            Slog.d(TAG, "onWakeUpFinished");
+        mInputManagerInternal.setInteractive(interactive);
+
+        if (interactive) {
+            try {
+                mBatteryStats.noteInteractive(true);
+            } catch (RemoteException ex) { }
         }
     }
 
     /**
-     * Called when the device is going to sleep.
+     * Notifies that the device has finished changing interactive state.
      */
-    public void onGoToSleepStarted(int reason) {
+    public void onInteractiveStateChangeFinished(boolean interactive) {
         if (DEBUG) {
-            Slog.d(TAG, "onGoToSleepStarted");
+            Slog.d(TAG, "onInteractiveChangeFinished");
         }
 
         synchronized (mLock) {
-            mLastGoToSleepReason = reason;
-        }
-    }
-
-    /**
-     * Called when the device has finished going to sleep and the
-     * display has been turned off.
-     *
-     * This is a good time to make transitions that we don't want the user to see,
-     * such as bringing the key guard to focus.  There's no guarantee for this,
-     * however because the user could turn the device on again at any time.
-     * Some things may need to be protected by other mechanisms that defer screen on.
-     */
-    public void onGoToSleepFinished() {
-        if (DEBUG) {
-            Slog.d(TAG, "onGoToSleepFinished");
-        }
-
-        synchronized (mLock) {
-            if (mActualPowerState != POWER_STATE_ASLEEP) {
-                mActualPowerState = POWER_STATE_ASLEEP;
-                mPendingGoToSleepBroadcast = true;
-                if (mUserActivityPending) {
-                    mUserActivityPending = false;
-                    mHandler.removeMessages(MSG_USER_ACTIVITY);
+            if (!interactive) {
+                // Finished going to sleep...
+                // This is a good time to make transitions that we don't want the user to see,
+                // such as bringing the key guard to focus.  There's no guarantee for this,
+                // however because the user could turn the device on again at any time.
+                // Some things may need to be protected by other mechanisms that defer screen on.
+                if (mActualPowerState != POWER_STATE_ASLEEP) {
+                    mActualPowerState = POWER_STATE_ASLEEP;
+                    mPendingGoToSleepBroadcast = true;
+                    if (mUserActivityPending) {
+                        mUserActivityPending = false;
+                        mHandler.removeMessages(MSG_USER_ACTIVITY);
+                    }
+                    updatePendingBroadcastLocked();
                 }
-                updatePendingBroadcastLocked();
             }
+        }
+
+        if (!interactive) {
+            try {
+                mBatteryStats.noteInteractive(false);
+            } catch (RemoteException ex) { }
         }
     }
 
@@ -423,13 +389,8 @@ final class Notifier {
 
         EventLog.writeEvent(EventLogTags.POWER_SCREEN_STATE, 1, 0, 0, 0);
 
-        mPolicy.screenTurningOn(mScreenOnListener);
-
-        try {
-            ActivityManagerNative.getDefault().wakingUp();
-        } catch (RemoteException e) {
-            // ignore it
-        }
+        mPolicy.wakingUp(mScreenOnListener);
+        mActivityManagerInternal.wakingUp();
 
         if (ActivityManagerNative.isSystemReady()) {
             mContext.sendOrderedBroadcastAsUser(mScreenOnIntent, UserHandle.ALL, null,
@@ -479,12 +440,8 @@ final class Notifier {
 
         EventLog.writeEvent(EventLogTags.POWER_SCREEN_STATE, 0, why, 0, 0);
 
-        mPolicy.screenTurnedOff(why);
-        try {
-            ActivityManagerNative.getDefault().goingToSleep();
-        } catch (RemoteException e) {
-            // ignore it.
-        }
+        mPolicy.goingToSleep(why);
+        mActivityManagerInternal.goingToSleep();
 
         if (ActivityManagerNative.isSystemReady()) {
             mContext.sendOrderedBroadcastAsUser(mScreenOffIntent, UserHandle.ALL, null,

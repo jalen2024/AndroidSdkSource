@@ -38,10 +38,12 @@ import com.android.internal.widget.ActionBarContainer;
 import com.android.internal.widget.ActionBarContextView;
 import com.android.internal.widget.ActionBarOverlayLayout;
 import com.android.internal.widget.ActionBarView;
+import com.android.internal.widget.SwipeDismissLayout;
 
 import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
 import android.content.res.Configuration;
 import android.content.res.Resources;
 import android.content.res.TypedArray;
@@ -124,6 +126,7 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
     TypedValue mFixedWidthMinor;
     TypedValue mFixedHeightMajor;
     TypedValue mFixedHeightMinor;
+    TypedValue mOutsetBottom;
 
     // This is the top-level view of the window, containing the window decor.
     private DecorView mDecor;
@@ -266,6 +269,20 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
         if ((features & (1 << FEATURE_ACTION_BAR)) != 0 && featureId == FEATURE_NO_TITLE) {
             // Remove the action bar feature if we have no title. No title dominates.
             removeFeature(FEATURE_ACTION_BAR);
+        }
+
+        if ((features & (1 << FEATURE_ACTION_BAR)) != 0 && featureId == FEATURE_SWIPE_TO_DISMISS) {
+            throw new AndroidRuntimeException(
+                    "You cannot combine swipe dismissal and the action bar.");
+        }
+        if ((features & (1 << FEATURE_SWIPE_TO_DISMISS)) != 0 && featureId == FEATURE_ACTION_BAR) {
+            throw new AndroidRuntimeException(
+                    "You cannot combine swipe dismissal and the action bar.");
+        }
+
+        if (featureId == FEATURE_INDETERMINATE_PROGRESS &&
+                getContext().getPackageManager().hasSystemFeature(PackageManager.FEATURE_WATCH)) {
+            throw new AndroidRuntimeException("You cannot use indeterminate progress on a watch.");
         }
         return super.requestFeature(featureId);
     }
@@ -2242,7 +2259,6 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
         protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
             final DisplayMetrics metrics = getContext().getResources().getDisplayMetrics();
             final boolean isPortrait = metrics.widthPixels < metrics.heightPixels;
-
             final int widthMode = getMode(widthMeasureSpec);
             final int heightMode = getMode(heightMeasureSpec);
 
@@ -2279,12 +2295,26 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
                     } else {
                         h = 0;
                     }
-
                     if (h > 0) {
                         final int heightSize = MeasureSpec.getSize(heightMeasureSpec);
                         heightMeasureSpec = MeasureSpec.makeMeasureSpec(
                                 Math.min(h, heightSize), EXACTLY);
                     }
+                }
+            }
+
+            if (mOutsetBottom != null) {
+                int mode = MeasureSpec.getMode(heightMeasureSpec);
+                if (mode != MeasureSpec.UNSPECIFIED && !isPortrait) {
+                    int outset = (int) mOutsetBottom.getDimension(metrics);
+                    int height = MeasureSpec.getSize(heightMeasureSpec);
+                    heightMeasureSpec = MeasureSpec.makeMeasureSpec(height + outset, mode);
+                }
+                mode = MeasureSpec.getMode(widthMeasureSpec);
+                if (mode != MeasureSpec.UNSPECIFIED && isPortrait) {
+                    int outset = (int) mOutsetBottom.getDimension(metrics);
+                    int width = MeasureSpec.getSize(widthMeasureSpec);
+                    widthMeasureSpec = MeasureSpec.makeMeasureSpec(width + outset, mode);
                 }
             }
 
@@ -2838,6 +2868,10 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
             requestFeature(FEATURE_ACTION_MODE_OVERLAY);
         }
 
+        if (a.getBoolean(com.android.internal.R.styleable.Window_windowSwipeToDismiss, false)) {
+            requestFeature(FEATURE_SWIPE_TO_DISMISS);
+        }
+
         if (a.getBoolean(com.android.internal.R.styleable.Window_windowFullscreen, false)) {
             setFlags(FLAG_FULLSCREEN, FLAG_FULLSCREEN & (~getForcedWindowFlags()));
         }
@@ -2889,6 +2923,10 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
             if (mFixedHeightMinor == null) mFixedHeightMinor = new TypedValue();
             a.getValue(com.android.internal.R.styleable.Window_windowFixedHeightMinor,
                     mFixedHeightMinor);
+        }
+        if (a.hasValue(com.android.internal.R.styleable.Window_windowOutsetBottom)) {
+            if (mOutsetBottom == null) mOutsetBottom = new TypedValue();
+            a.getValue(com.android.internal.R.styleable.Window_windowOutsetBottom, mOutsetBottom);
         }
 
         final Context context = getContext();
@@ -2964,7 +3002,9 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
         int layoutResource;
         int features = getLocalFeatures();
         // System.out.println("Features: 0x" + Integer.toHexString(features));
-        if ((features & ((1 << FEATURE_LEFT_ICON) | (1 << FEATURE_RIGHT_ICON))) != 0) {
+        if ((features & (1 << FEATURE_SWIPE_TO_DISMISS)) != 0) {
+            layoutResource = com.android.internal.R.layout.screen_swipe_dismiss;
+        } else if ((features & ((1 << FEATURE_LEFT_ICON) | (1 << FEATURE_RIGHT_ICON))) != 0) {
             if (mIsFloating) {
                 TypedValue res = new TypedValue();
                 getContext().getTheme().resolveAttribute(
@@ -3032,6 +3072,10 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
             if (progress != null) {
                 progress.setIndeterminate(true);
             }
+        }
+
+        if ((features & (1 << FEATURE_SWIPE_TO_DISMISS)) != 0) {
+            registerSwipeCallbacks();
         }
 
         // Remaining setup -- of background and title -- that only applies
@@ -3388,6 +3432,47 @@ public class PhoneWindow extends Window implements MenuBuilder.Callback {
             installDecor();
         }
         return (mRightIconView = (ImageView)findViewById(com.android.internal.R.id.right_icon));
+    }
+
+    private void registerSwipeCallbacks() {
+        SwipeDismissLayout swipeDismiss =
+                (SwipeDismissLayout) findViewById(com.android.internal.R.id.content);
+        swipeDismiss.setOnDismissedListener(new SwipeDismissLayout.OnDismissedListener() {
+            @Override
+            public void onDismissed(SwipeDismissLayout layout) {
+                dispatchOnWindowDismissed();
+            }
+        });
+        swipeDismiss.setOnSwipeProgressChangedListener(
+                new SwipeDismissLayout.OnSwipeProgressChangedListener() {
+                    private static final float ALPHA_DECREASE = 0.5f;
+                    private boolean mIsTranslucent = false;
+                    @Override
+                    public void onSwipeProgressChanged(
+                            SwipeDismissLayout layout, float progress, float translate) {
+                        WindowManager.LayoutParams newParams = getAttributes();
+                        newParams.x = (int) translate;
+                        newParams.alpha = 1 - (progress * ALPHA_DECREASE);
+                        setAttributes(newParams);
+
+                        int flags = 0;
+                        if (newParams.x == 0) {
+                            flags = FLAG_FULLSCREEN;
+                        } else {
+                            flags = FLAG_LAYOUT_NO_LIMITS;
+                        }
+                        setFlags(flags, FLAG_FULLSCREEN | FLAG_LAYOUT_NO_LIMITS);
+                    }
+
+                    @Override
+                    public void onSwipeCancelled(SwipeDismissLayout layout) {
+                        WindowManager.LayoutParams newParams = getAttributes();
+                        newParams.x = 0;
+                        newParams.alpha = 1;
+                        setAttributes(newParams);
+                        setFlags(FLAG_FULLSCREEN, FLAG_FULLSCREEN | FLAG_LAYOUT_NO_LIMITS);
+                    }
+                });
     }
 
     /**

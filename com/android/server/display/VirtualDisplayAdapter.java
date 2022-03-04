@@ -69,6 +69,13 @@ final class VirtualDisplayAdapter extends DisplayAdapter {
         return device;
     }
 
+    public void setVirtualDisplaySurfaceLocked(IBinder appToken, Surface surface) {
+        VirtualDisplayDevice device = mVirtualDisplayDevices.get(appToken);
+        if (device != null) {
+            device.setSurfaceLocked(surface);
+        }
+    }
+
     public DisplayDevice releaseVirtualDisplayLocked(IBinder appToken) {
         VirtualDisplayDevice device = mVirtualDisplayDevices.remove(appToken);
         if (device != null) {
@@ -144,6 +151,17 @@ final class VirtualDisplayAdapter extends DisplayAdapter {
             }
         }
 
+        public void setSurfaceLocked(Surface surface) {
+            if (mSurface != surface) {
+                if ((mSurface != null) != (surface != null)) {
+                    sendDisplayDeviceEventLocked(this, DISPLAY_DEVICE_EVENT_CHANGED);
+                }
+                sendTraversalRequestLocked();
+                mSurface = surface;
+                mInfo = null;
+            }
+        }
+
         @Override
         public DisplayDeviceInfo getDisplayDeviceInfoLocked() {
             if (mInfo == null) {
@@ -157,8 +175,11 @@ final class VirtualDisplayAdapter extends DisplayAdapter {
                 mInfo.yDpi = mDensityDpi;
                 mInfo.flags = 0;
                 if ((mFlags & DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC) == 0) {
-                    mInfo.flags |= DisplayDeviceInfo.FLAG_PRIVATE |
-                            DisplayDeviceInfo.FLAG_NEVER_BLANK;
+                    mInfo.flags |= DisplayDeviceInfo.FLAG_PRIVATE
+                            | DisplayDeviceInfo.FLAG_NEVER_BLANK
+                            | DisplayDeviceInfo.FLAG_OWN_CONTENT_ONLY;
+                } else if ((mFlags & DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY) != 0) {
+                    mInfo.flags |= DisplayDeviceInfo.FLAG_OWN_CONTENT_ONLY;
                 }
                 if ((mFlags & DisplayManager.VIRTUAL_DISPLAY_FLAG_SECURE) != 0) {
                     mInfo.flags |= DisplayDeviceInfo.FLAG_SECURE;
@@ -168,6 +189,7 @@ final class VirtualDisplayAdapter extends DisplayAdapter {
                 }
                 mInfo.type = Display.TYPE_VIRTUAL;
                 mInfo.touch = DisplayDeviceInfo.TOUCH_NONE;
+                mInfo.state = mSurface != null ? Display.STATE_ON : Display.STATE_OFF;
                 mInfo.ownerUid = mOwnerUid;
                 mInfo.ownerPackageName = mOwnerPackageName;
             }

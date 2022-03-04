@@ -49,7 +49,7 @@ public class Build {
     /** The manufacturer of the product/hardware. */
     public static final String MANUFACTURER = getString("ro.product.manufacturer");
 
-    /** The brand (e.g., carrier) the software is customized for, if any. */
+    /** The consumer-visible brand with which the product/hardware will be associated, if any. */
     public static final String BRAND = getString("ro.product.brand");
 
     /** The end-user-visible name for the end product. */
@@ -467,6 +467,18 @@ public class Build {
          * </ul>
          */
         public static final int KITKAT = 19;
+
+        /**
+         * Android 4.4W: KitKat for watches, snacks on the run.
+         *
+         * <p>Applications targeting this or a later release will get these
+         * new changes in behavior:</p>
+         * <ul>
+         * <li>{@link android.app.AlertDialog} might not have a default background if the theme does
+         * not specify one.</li>
+         * </ul>
+         */
+        public static final int KITKAT_WATCH = 20;
     }
     
     /** The type of build, like "user" or "eng". */

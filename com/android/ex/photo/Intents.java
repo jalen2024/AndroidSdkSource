@@ -77,6 +77,12 @@ public class Intents {
         return new PhotoViewIntentBuilder(context, cls);
     }
 
+    /** Gets a new photo view intent builder */
+    public static PhotoViewIntentBuilder newPhotoViewIntentBuilder(
+            Context context, String activityName) {
+        return new PhotoViewIntentBuilder(context, activityName);
+    }
+
     /** Builder to create a photo view intent */
     public static class PhotoViewIntentBuilder {
         private final Intent mIntent;
@@ -118,6 +124,16 @@ public class Intents {
 
         private PhotoViewIntentBuilder(Context context, Class<?> cls) {
             mIntent = new Intent(context, cls);
+            initialize();
+        }
+
+        private PhotoViewIntentBuilder(Context context, String activityName) {
+            mIntent = new Intent();
+            mIntent.setClassName(context, activityName);
+            initialize();
+        }
+
+        private void initialize() {
             mScaleAnimation = false;
             mActionBarHiddenInitially = false;
             mDisplayFullScreenThumbs = false;
@@ -183,6 +199,17 @@ public class Intents {
             return this;
         }
 
+        /**
+         * Enable a scale animation that animates the initial photo URI passed in using
+         * {@link #setInitialPhotoUri}.
+         *
+         * Note: To avoid janky transitions, particularly when exiting the photoviewer, ensure the
+         * following system UI flags are set on the root view of the relying app's activity
+         * (via @{link View.setSystemUiVisibility(int)}):
+         *     {@code View.SYSTEM_UI_FLAG_VISIBLE | View.SYSTEM_UI_FLAG_LAYOUT_STABLE}
+         * As well, client should ensure {@code android:fitsSystemWindows} is set on the root
+         * content view.
+         */
         public PhotoViewIntentBuilder setScaleAnimation(int startX, int startY,
                 int startWidth, int startHeight) {
             mScaleAnimation = true;

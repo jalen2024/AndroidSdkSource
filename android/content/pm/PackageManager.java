@@ -894,10 +894,18 @@ public abstract class PackageManager {
     /**
      * Feature for {@link #getSystemAvailableFeatures} and
      * {@link #hasSystemFeature}: The device has at least one camera pointing in
-     * some direction.
+     * some direction, or can support an external camera being connected to it.
      */
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_CAMERA_ANY = "android.hardware.camera.any";
+
+    /**
+     * Feature for {@link #getSystemAvailableFeatures} and
+     * {@link #hasSystemFeature}: The device can support having an external camera connected to it.
+     * The external camera may not always be connected or available to applications to use.
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_CAMERA_EXTERNAL = "android.hardware.camera.external";
 
     /**
      * Feature for {@link #getSystemAvailableFeatures} and
@@ -970,6 +978,7 @@ public abstract class PackageManager {
      * @hide
      * @deprecated
      */
+    @Deprecated
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_NFC_HCE = "android.hardware.nfc.hce";
 
@@ -1037,6 +1046,13 @@ public abstract class PackageManager {
      */
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_SENSOR_STEP_DETECTOR = "android.hardware.sensor.stepdetector";
+
+    /**
+     * Feature for {@link #getSystemAvailableFeatures} and
+     * {@link #hasSystemFeature}: The device includes a heart rate monitor.
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_SENSOR_HEART_RATE = "android.hardware.sensor.heartrate";
 
     /**
      * Feature for {@link #getSystemAvailableFeatures} and
@@ -1225,6 +1241,27 @@ public abstract class PackageManager {
 
     /**
      * Feature for {@link #getSystemAvailableFeatures} and
+     * {@link #hasSystemFeature}: The device supports leanback UI. This is
+     * typically used in a living room television experience, but is a software
+     * feature unlike {@link #FEATURE_TELEVISION}. Devices running with this
+     * feature will use resources associated with the "television" UI mode.
+     * @hide
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_LEANBACK = "android.software.leanback";
+
+    /**
+     * Feature for {@link #getSystemAvailableFeatures} and
+     * {@link #hasSystemFeature}: The device supports only leanback UI. Only
+     * applications designed for this experience should be run, though this is
+     * not enforced by the system.
+     * @hide
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_LEANBACK_ONLY = "android.software.leanback_only";
+
+    /**
+     * Feature for {@link #getSystemAvailableFeatures} and
      * {@link #hasSystemFeature}: The device supports WiFi (802.11) networking.
      */
     @SdkConstant(SdkConstantType.FEATURE)
@@ -1247,6 +1284,37 @@ public abstract class PackageManager {
      */
     @SdkConstant(SdkConstantType.FEATURE)
     public static final String FEATURE_TELEVISION = "android.hardware.type.television";
+
+    /**
+     * Feature for {@link #getSystemAvailableFeatures} and
+     * {@link #hasSystemFeature}: This is a device dedicated to showing UI
+     * on a watch. A watch here is defined to be a device worn on the body, perhaps on
+     * the wrist. The user is very close when interacting with the device.
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_WATCH = "android.hardware.type.watch";
+
+    /**
+     * Feature for {@link #getSystemAvailableFeatures} and {@link #hasSystemFeature}:
+     * The device supports printing.
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_PRINTING = "android.software.print";
+
+    /**
+     * Feature for {@link #getSystemAvailableFeatures} and {@link #hasSystemFeature}:
+     * The device can perform backup and restore operations on installed applications.
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_BACKUP = "android.software.backup";
+
+    /**
+     * Feature for {@link #getSystemAvailableFeatures} and {@link #hasSystemFeature}:
+     * The device has a full implementation of the android.webkit.* APIs. Devices
+     * lacking this feature will not have a functioning WebView implementation.
+     */
+    @SdkConstant(SdkConstantType.FEATURE)
+    public static final String FEATURE_WEBVIEW = "android.software.webview";
 
     /**
      * Action to external storage service to clean out removed apps.
@@ -1411,17 +1479,33 @@ public abstract class PackageManager {
     public abstract Intent getLaunchIntentForPackage(String packageName);
 
     /**
-     * Return an array of all of the secondary group-ids that have been
-     * assigned to a package.
-     *
-     * <p>Throws {@link NameNotFoundException} if a package with the given
-     * name cannot be found on the system.
-     *
+     * @hide Return a "good" intent to launch a front-door Leanback activity in a
+     * package, for use for example to implement an "open" button when browsing
+     * through packages. The current implementation will look for a main
+     * activity in the category {@link Intent#CATEGORY_LEANBACK_LAUNCHER}, or
+     * return null if no main leanback activities are found.
+     * <p>
+     * Throws {@link NameNotFoundException} if a package with the given name
+     * cannot be found on the system.
+     * 
+     * @param packageName The name of the package to inspect.
+     * @return Returns either a fully-qualified Intent that can be used to launch
+     *         the main Leanback activity in the package, or null if the package
+     *         does not contain such an activity.
+     */
+    public abstract Intent getLeanbackLaunchIntentForPackage(String packageName);
+
+    /**
+     * Return an array of all of the secondary group-ids that have been assigned
+     * to a package.
+     * <p>
+     * Throws {@link NameNotFoundException} if a package with the given name
+     * cannot be found on the system.
+     * 
      * @param packageName The full name (i.e. com.google.apps.contacts) of the
-     *                    desired package.
-     *
-     * @return Returns an int array of the assigned gids, or null if there
-     * are none.
+     *            desired package.
+     * @return Returns an int array of the assigned gids, or null if there are
+     *         none.
      */
     public abstract int[] getPackageGids(String packageName)
             throws NameNotFoundException;
@@ -2369,6 +2453,40 @@ public abstract class PackageManager {
             throws NameNotFoundException;
 
     /**
+     * Retrieve the banner associated with an activity. Given the full name of
+     * an activity, retrieves the information about it and calls
+     * {@link ComponentInfo#loadIcon ComponentInfo.loadIcon()} to return its
+     * banner. If the activity cannot be found, NameNotFoundException is thrown.
+     *
+     * @param activityName Name of the activity whose banner is to be retrieved.
+     * @return Returns the image of the banner, or null if the activity has no
+     *         banner specified.
+     * @throws NameNotFoundException Thrown if the resources for the given
+     *             activity could not be loaded.
+     * @see #getActivityBanner(Intent)
+     */
+    public abstract Drawable getActivityBanner(ComponentName activityName)
+            throws NameNotFoundException;
+
+    /**
+     * Retrieve the banner associated with an Intent. If intent.getClassName()
+     * is set, this simply returns the result of
+     * getActivityBanner(intent.getClassName()). Otherwise it resolves the
+     * intent's component and returns the banner associated with the resolved
+     * component. If intent.getClassName() cannot be found or the Intent cannot
+     * be resolved to a component, NameNotFoundException is thrown.
+     *
+     * @param intent The intent for which you would like to retrieve a banner.
+     * @return Returns the image of the banner, or null if the activity has no
+     *         banner specified.
+     * @throws NameNotFoundException Thrown if the resources for application
+     *             matching the given intent could not be loaded.
+     * @see #getActivityBanner(ComponentName)
+     */
+    public abstract Drawable getActivityBanner(Intent intent)
+            throws NameNotFoundException;
+
+    /**
      * Return the generic icon for an activity that is used when no specific
      * icon is defined.
      *
@@ -2409,19 +2527,43 @@ public abstract class PackageManager {
             throws NameNotFoundException;
 
     /**
-     * Retrieve the logo associated with an activity.  Given the full name of
-     * an activity, retrieves the information about it and calls
-     * {@link ComponentInfo#loadLogo ComponentInfo.loadLogo()} to return its logo.
-     * If the activity cannot be found, NameNotFoundException is thrown.
+     * Retrieve the banner associated with an application.
+     *
+     * @param info Information about application being queried.
+     * @return Returns the image of the banner or null if the application has no
+     *         banner specified.
+     * @see #getApplicationBanner(String)
+     */
+    public abstract Drawable getApplicationBanner(ApplicationInfo info);
+
+    /**
+     * Retrieve the banner associated with an application. Given the name of the
+     * application's package, retrieves the information about it and calls
+     * getApplicationIcon() to return its banner. If the application cannot be
+     * found, NameNotFoundException is thrown.
+     *
+     * @param packageName Name of the package whose application banner is to be
+     *            retrieved.
+     * @return Returns the image of the banner or null if the application has no
+     *         banner specified.
+     * @throws NameNotFoundException Thrown if the resources for the given
+     *             application could not be loaded.
+     * @see #getApplicationBanner(ApplicationInfo)
+     */
+    public abstract Drawable getApplicationBanner(String packageName)
+            throws NameNotFoundException;
+
+    /**
+     * Retrieve the logo associated with an activity. Given the full name of an
+     * activity, retrieves the information about it and calls
+     * {@link ComponentInfo#loadLogo ComponentInfo.loadLogo()} to return its
+     * logo. If the activity cannot be found, NameNotFoundException is thrown.
      *
      * @param activityName Name of the activity whose logo is to be retrieved.
-     *
-     * @return Returns the image of the logo or null if the activity has no
-     * logo specified.
-     *
+     * @return Returns the image of the logo or null if the activity has no logo
+     *         specified.
      * @throws NameNotFoundException Thrown if the resources for the given
-     * activity could not be loaded.
-     *
+     *             activity could not be loaded.
      * @see #getActivityLogo(Intent)
      */
     public abstract Drawable getActivityLogo(ComponentName activityName)

@@ -70,7 +70,6 @@ public final class AssetManager {
     
     // For communication with native code.
     private int mObject;
-    private int mNObject;  // used by the NDK
 
     private StringBlock mStringBlocks[] = null;
     
@@ -538,6 +537,12 @@ public final class AssetManager {
     
     public final class AssetInputStream extends InputStream {
         public final int getAssetInt() {
+            return mAsset;
+        }
+        /**
+         * @hide
+         */
+        public final long getNativeAsset() {
             return mAsset;
         }
         private AssetInputStream(int asset)

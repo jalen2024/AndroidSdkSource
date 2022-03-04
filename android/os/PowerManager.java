@@ -191,6 +191,18 @@ public final class PowerManager {
     public static final int PROXIMITY_SCREEN_OFF_WAKE_LOCK = 0x00000020;
 
     /**
+     * Wake lock level: Put the screen in a low power state and allow the CPU to suspend
+     * if no other wake locks are held.
+     * <p>
+     * This is used by the dream manager to implement doze mode.  It currently
+     * has no effect unless the power manager is in the dozing state.
+     * </p>
+     *
+     * {@hide}
+     */
+    public static final int DOZE_WAKE_LOCK = 0x00000040;
+
+    /**
      * Mask for the wake lock level component of a combined wake lock level and flags integer.
      *
      * @hide
@@ -289,6 +301,12 @@ public final class PowerManager {
      * @hide
      */
     public static final int GO_TO_SLEEP_REASON_TIMEOUT = 2;
+
+    /**
+     * Go to sleep flag: Skip dozing state and directly go to full sleep.
+     * @hide
+     */
+    public static final int GO_TO_SLEEP_FLAG_NO_DOZE = 1 << 0;
 
     final Context mContext;
     final IPowerManager mService;
@@ -418,6 +436,7 @@ public final class PowerManager {
             case SCREEN_BRIGHT_WAKE_LOCK:
             case FULL_WAKE_LOCK:
             case PROXIMITY_SCREEN_OFF_WAKE_LOCK:
+            case DOZE_WAKE_LOCK:
                 break;
             default:
                 throw new IllegalArgumentException("Must specify a valid wake lock level.");
@@ -477,8 +496,15 @@ public final class PowerManager {
      * @see #wakeUp
      */
     public void goToSleep(long time) {
+        goToSleep(time, GO_TO_SLEEP_REASON_USER, 0);
+    }
+
+    /**
+     * @hide
+     */
+    public void goToSleep(long time, int reason, int flags) {
         try {
-            mService.goToSleep(time, GO_TO_SLEEP_REASON_USER);
+            mService.goToSleep(time, reason, flags);
         } catch (RemoteException e) {
         }
     }
@@ -569,21 +595,64 @@ public final class PowerManager {
     }
 
     /**
-      * Returns whether the screen is currently on.
+      * Returns true if the device is in an interactive state.
       * <p>
-      * Only indicates whether the screen is on.  The screen could be either bright or dim.
+      * For historical reasons, the name of this method refers to the power state of
+      * the screen but it actually describes the overall interactive state of
+      * the device.  This method has been replaced by {@link #isInteractive}.
       * </p><p>
-      * {@samplecode
-      * PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
-      * boolean isScreenOn = pm.isScreenOn();
-      * }
+      * The value returned by this method only indicates whether the device is
+      * in an interactive state which may have nothing to do with the screen being
+      * on or off.  To determine the actual state of the screen,
+      * use {@link android.view.Display#getState}.
       * </p>
       *
-      * @return whether the screen is on (bright or dim).
+      * @return True if the device is in an interactive state.
+      *
+      * @deprecated Use {@link #isInteractive} instead.
       */
+    @Deprecated
     public boolean isScreenOn() {
+        return isInteractive();
+    }
+
+    /**
+     * Returns true if the device is in an interactive state.
+     * <p>
+     * When this method returns true, the device is awake and ready to interact
+     * with the user (although this is not a guarantee that the user is actively
+     * interacting with the device just this moment).  The main screen is usually
+     * turned on while in this state.  Certain features, such as the proximity
+     * sensor, may temporarily turn off the screen while still leaving the device in an
+     * interactive state.  Note in particular that the device is still considered
+     * to be interactive while dreaming (since dreams can be interactive) but not
+     * when it is dozing or asleep.
+     * </p><p>
+     * When this method returns false, the device is dozing or asleep and must
+     * be awoken before it will become ready to interact with the user again.  The
+     * main screen is usually turned off while in this state.  Certain features,
+     * such as "ambient mode" may cause the main screen to remain on (albeit in a
+     * low power state) to display system-provided content while the device dozes.
+     * </p><p>
+     * The system will send a {@link android.content.Intent#ACTION_SCREEN_ON screen on}
+     * or {@link android.content.Intent#ACTION_SCREEN_OFF screen off} broadcast
+     * whenever the interactive state of the device changes.  For historical reasons,
+     * the names of these broadcasts refer to the power state of the screen
+     * but they are actually sent in response to changes in the overall interactive
+     * state of the device, as described by this method.
+     * </p><p>
+     * Services may use the non-interactive state as a hint to conserve power
+     * since the user is not present.
+     * </p>
+     *
+     * @return True if the device is in an interactive state.
+     *
+     * @see android.content.Intent#ACTION_SCREEN_ON
+     * @see android.content.Intent#ACTION_SCREEN_OFF
+     */
+    public boolean isInteractive() {
         try {
-            return mService.isScreenOn();
+            return mService.isInteractive();
         } catch (RemoteException e) {
             return false;
         }

@@ -24,6 +24,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.os.BatteryStats;
 import android.os.Binder;
+import android.os.Handler;
 import android.os.IBinder;
 import android.os.Parcel;
 import android.os.Process;
@@ -54,8 +55,8 @@ public final class BatteryStatsService extends IBatteryStats.Stub {
     private boolean mBluetoothPendingStats;
     private BluetoothHeadset mBluetoothHeadset;
 
-    BatteryStatsService(String filename) {
-        mStats = new BatteryStatsImpl(filename);
+    BatteryStatsService(String filename, Handler handler) {
+        mStats = new BatteryStatsImpl(filename, handler);
     }
     
     public void publish(Context context) {
@@ -174,10 +175,10 @@ public final class BatteryStatsService extends IBatteryStats.Stub {
         }
     }
         
-    public void noteScreenOn() {
+    public void noteScreenState(int state) {
         enforceCallingPermission();
         synchronized (mStats) {
-            mStats.noteScreenOnLocked();
+            mStats.noteScreenStateLocked(state);
         }
     }
     
@@ -188,22 +189,17 @@ public final class BatteryStatsService extends IBatteryStats.Stub {
         }
     }
     
-    public void noteScreenOff() {
-        enforceCallingPermission();
-        synchronized (mStats) {
-            mStats.noteScreenOffLocked();
-        }
-    }
-
-    public void noteInputEvent() {
-        enforceCallingPermission();
-        mStats.noteInputEventAtomic();
-    }
-    
     public void noteUserActivity(int uid, int event) {
         enforceCallingPermission();
         synchronized (mStats) {
             mStats.noteUserActivityLocked(uid, event);
+        }
+    }
+    
+    public void noteInteractive(boolean interactive) {
+        enforceCallingPermission();
+        synchronized (mStats) {
+            mStats.noteInteractiveLocked(interactive);
         }
     }
     

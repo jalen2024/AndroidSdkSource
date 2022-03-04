@@ -86,8 +86,7 @@ public interface WindowManagerPolicy {
     public final static int FLAG_FILTERED = 0x04000000;
     public final static int FLAG_DISABLE_KEY_REPEAT = 0x08000000;
 
-    public final static int FLAG_WOKE_HERE = 0x10000000;
-    public final static int FLAG_BRIGHT_HERE = 0x20000000;
+    public final static int FLAG_INTERACTIVE = 0x20000000;
     public final static int FLAG_PASS_TO_USER = 0x40000000;
 
     // Flags used for indicating whether the internal and/or external input devices
@@ -113,20 +112,6 @@ public interface WindowManagerPolicy {
      * {@link #interceptKeyBeforeQueueing}.
      */
     public final static int ACTION_PASS_TO_USER = 0x00000001;
-
-    /**
-     * This key event should wake the device.
-     * To be returned from {@link #interceptKeyBeforeQueueing}.
-     * Do not return this and {@link #ACTION_GO_TO_SLEEP} or {@link #ACTION_PASS_TO_USER}.
-     */
-    public final static int ACTION_WAKE_UP = 0x00000002;
-
-    /**
-     * This key event should put the device to sleep (and engage keyguard if necessary)
-     * To be returned from {@link #interceptKeyBeforeQueueing}.
-     * Do not return this and {@link #ACTION_WAKE_UP} or {@link #ACTION_PASS_TO_USER}.
-     */
-    public final static int ACTION_GO_TO_SLEEP = 0x00000004;
 
     /**
      * Interface to the Window Manager state associated with a particular
@@ -461,8 +446,6 @@ public interface WindowManagerPolicy {
     public final int OFF_BECAUSE_OF_USER = 2;
     /** Screen turned off because of timeout */
     public final int OFF_BECAUSE_OF_TIMEOUT = 3;
-    /** Screen turned off because of proximity sensor */
-    public final int OFF_BECAUSE_OF_PROX_SENSOR = 4;
 
     /** When not otherwise specified by the activity's screenOrientation, rotation should be
      * determined by the system (that is, using sensors). */
@@ -749,12 +732,10 @@ public interface WindowManagerPolicy {
      * because it's the most fragile.
      * @param event The key event.
      * @param policyFlags The policy flags associated with the key.
-     * @param isScreenOn True if the screen is already on
      *
-     * @return The bitwise or of the {@link #ACTION_PASS_TO_USER},
-     *      {@link #ACTION_WAKE_UP} and {@link #ACTION_GO_TO_SLEEP} flags.
+     * @return Actions flags: may be {@link #ACTION_PASS_TO_USER}.
      */
-    public int interceptKeyBeforeQueueing(KeyEvent event, int policyFlags, boolean isScreenOn);
+    public int interceptKeyBeforeQueueing(KeyEvent event, int policyFlags);
 
     /**
      * Called from the input reader thread before a motion is enqueued when the screen is off.
@@ -765,10 +746,9 @@ public interface WindowManagerPolicy {
      * because it's the most fragile.
      * @param policyFlags The policy flags associated with the motion.
      *
-     * @return The bitwise or of the {@link #ACTION_PASS_TO_USER},
-     *      {@link #ACTION_WAKE_UP} and {@link #ACTION_GO_TO_SLEEP} flags.
+     * @return Actions flags: may be {@link #ACTION_PASS_TO_USER}.
      */
-    public int interceptMotionBeforeQueueingWhenScreenOff(int policyFlags);
+    public int interceptWakeMotionBeforeQueueing(long whenNanos, int policyFlags);
 
     /**
      * Called from the input dispatcher thread before a key is dispatched to a window.
@@ -916,23 +896,23 @@ public interface WindowManagerPolicy {
     public int focusChangedLw(WindowState lastFocus, WindowState newFocus);
     
     /**
-     * Called after the screen turns off.
+     * Called when the device is going to sleep.
      *
      * @param why {@link #OFF_BECAUSE_OF_USER} or
      * {@link #OFF_BECAUSE_OF_TIMEOUT}.
      */
-    public void screenTurnedOff(int why);
+    public void goingToSleep(int why);
 
     public interface ScreenOnListener {
         void onScreenOn();
     }
 
     /**
-     * Called when the power manager would like to turn the screen on.
+     * Called when the device is waking up.
      * Must call back on the listener to tell it when the higher-level system
      * is ready for the screen to go on (i.e. the lock screen is shown).
      */
-    public void screenTurningOn(ScreenOnListener screenOnListener);
+    public void wakingUp(ScreenOnListener screenOnListener);
 
     /**
      * Return whether the screen is about to turn on or is currently on.

@@ -93,9 +93,10 @@ import com.android.internal.os.BinderInternal;
 import com.android.internal.os.RuntimeInit;
 import com.android.internal.os.SamplingProfilerIntegration;
 import com.android.internal.util.FastPrintWriter;
-import com.android.internal.util.Objects;
 import com.android.org.conscrypt.OpenSSLSocketImpl;
 import com.google.android.collect.Lists;
+
+import dalvik.system.VMRuntime;
 
 import java.io.File;
 import java.io.FileDescriptor;
@@ -109,6 +110,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.TimeZone;
 import java.util.regex.Pattern;
 
@@ -117,6 +119,7 @@ import libcore.io.EventLogger;
 import libcore.io.IoUtils;
 
 import dalvik.system.CloseGuard;
+import dalvik.system.VMRuntime;
 
 final class RemoteServiceException extends AndroidRuntimeException {
     public RemoteServiceException(String msg) {
@@ -152,7 +155,7 @@ public final class ActivityThread {
     private static final int LOG_ON_PAUSE_CALLED = 30021;
     private static final int LOG_ON_RESUME_CALLED = 30022;
 
-    static ContextImpl mSystemContext = null;
+    private ContextImpl mSystemContext;
 
     static IPackageManager sPackageManager;
 
@@ -221,7 +224,7 @@ public final class ActivityThread {
         public boolean equals(Object o) {
             if (o instanceof ProviderKey) {
                 final ProviderKey other = (ProviderKey) o;
-                return Objects.equal(authority, other.authority) && userId == other.userId;
+                return Objects.equals(authority, other.authority) && userId == other.userId;
             }
             return false;
         }
@@ -739,6 +742,9 @@ public final class ActivityThread {
 
             setCoreSettings(coreSettings);
 
+            // Tell the VMRuntime about the application.
+            VMRuntime.registerAppInfo(appInfo.dataDir, appInfo.processName);
+
             AppBindData data = new AppBindData();
             data.processName = processName;
             data.appInfo = appInfo;
@@ -1068,8 +1074,15 @@ public final class ActivityThread {
             synchronized (this) {
                 if (mLastProcessState != processState) {
                     mLastProcessState = processState;
-
-                    // Update Dalvik state here based on ActivityManager.PROCESS_STATE_* constants.
+                    // Update Dalvik state based on ActivityManager.PROCESS_STATE_* constants.
+                    final int DALVIK_PROCESS_STATE_JANK_PERCEPTIBLE = 0;
+                    final int DALVIK_PROCESS_STATE_JANK_IMPERCEPTIBLE = 1;
+                    int dalvikProcessState = DALVIK_PROCESS_STATE_JANK_IMPERCEPTIBLE;
+                    // TODO: Tune this since things like gmail sync are important background but not jank perceptible.
+                    if (processState <= ActivityManager.PROCESS_STATE_IMPORTANT_FOREGROUND) {
+                        dalvikProcessState = DALVIK_PROCESS_STATE_JANK_PERCEPTIBLE;
+                    }
+                    VMRuntime.getRuntime().updateProcessState(dalvikProcessState);
                     if (false) {
                         Slog.i(TAG, "******************* PROCESS STATE CHANGED TO: " + processState
                                 + (fromIpc ? " (from ipc": ""));
@@ -1645,7 +1658,7 @@ public final class ActivityThread {
                                 ? mBoundApplication.processName : null)
                         + ")");
                 packageInfo =
-                    new LoadedApk(this, aInfo, compatInfo, this, baseLoader,
+                    new LoadedApk(this, aInfo, compatInfo, baseLoader,
                             securityViolation, includeCode &&
                             (aInfo.flags&ApplicationInfo.FLAG_HAS_CODE) != 0);
                 if (includeCode) {
@@ -1698,26 +1711,15 @@ public final class ActivityThread {
     public ContextImpl getSystemContext() {
         synchronized (this) {
             if (mSystemContext == null) {
-                ContextImpl context =
-                    ContextImpl.createSystemContext(this);
-                LoadedApk info = new LoadedApk(this, "android", context, null,
-                        CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO);
-                context.init(info, null, this);
-                context.getResources().updateConfiguration(mResourcesManager.getConfiguration(),
-                        mResourcesManager.getDisplayMetricsLocked(Display.DEFAULT_DISPLAY));
-                mSystemContext = context;
-                //Slog.i(TAG, "Created system resources " + context.getResources()
-                //        + ": " + context.getResources().getConfiguration());
+                mSystemContext = ContextImpl.createSystemContext(this);
             }
+            return mSystemContext;
         }
-        return mSystemContext;
     }
 
     public void installSystemApplicationInfo(ApplicationInfo info) {
         synchronized (this) {
-            ContextImpl context = getSystemContext();
-            context.init(new LoadedApk(this, "android", context, info,
-                    CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO), null, this);
+            getSystemContext().installSystemApplicationInfo(info);
 
             // give ourselves a default profiler
             mProfiler = new Profiler();
@@ -2203,18 +2205,29 @@ public final class ActivityThread {
 
     private Context createBaseContextForActivity(ActivityClientRecord r,
             final Activity activity) {
-        ContextImpl appContext = new ContextImpl();
-        appContext.init(r.packageInfo, r.token, this);
+        ContextImpl appContext = ContextImpl.createActivityContext(this, r.packageInfo, r.token);
         appContext.setOuterContext(activity);
+        Context baseContext = appContext;
+
+        final DisplayManagerGlobal dm = DisplayManagerGlobal.getInstance();
+        try {
+            IActivityContainer container =
+                    ActivityManagerNative.getDefault().getEnclosingActivityContainer(r.token);
+            final int displayId =
+                    container == null ? Display.DEFAULT_DISPLAY : container.getDisplayId();
+            if (displayId > Display.DEFAULT_DISPLAY) {
+                Display display = dm.getRealDisplay(displayId, r.token);
+                baseContext = appContext.createDisplayContext(display);
+            }
+        } catch (RemoteException e) {
+        }
 
         // For debugging purposes, if the activity's package name contains the value of
         // the "debug.use-second-display" system property as a substring, then show
         // its content on a secondary display if there is one.
-        Context baseContext = appContext;
         String pkgName = SystemProperties.get("debug.second-display.pkg");
         if (pkgName != null && !pkgName.isEmpty()
                 && r.packageInfo.mPackageName.contains(pkgName)) {
-            DisplayManagerGlobal dm = DisplayManagerGlobal.getInstance();
             for (int displayId : dm.getDisplayIds()) {
                 if (displayId != Display.DEFAULT_DISPLAY) {
                     Display display = dm.getRealDisplay(displayId, r.token);
@@ -2489,8 +2502,7 @@ public final class ActivityThread {
                 agent = (BackupAgent) cl.loadClass(classname).newInstance();
 
                 // set up the agent's context
-                ContextImpl context = new ContextImpl();
-                context.init(packageInfo, null, this);
+                ContextImpl context = ContextImpl.createAppContext(this, packageInfo);
                 context.setOuterContext(agent);
                 agent.attach(context);
 
@@ -2562,11 +2574,10 @@ public final class ActivityThread {
         try {
             if (localLOGV) Slog.v(TAG, "Creating service " + data.info.name);
 
-            ContextImpl context = new ContextImpl();
-            context.init(packageInfo, null, this);
+            ContextImpl context = ContextImpl.createAppContext(this, packageInfo);
+            context.setOuterContext(service);
 
             Application app = packageInfo.makeApplication(false, mInstrumentation);
-            context.setOuterContext(service);
             service.attach(context, this, data.info.name, data.token, app,
                     ActivityManagerNative.getDefault());
             service.onCreate();
@@ -4162,8 +4173,7 @@ public final class ActivityThread {
         }
         updateDefaultDensity();
 
-        final ContextImpl appContext = new ContextImpl();
-        appContext.init(data.info, null, this);
+        final ContextImpl appContext = ContextImpl.createAppContext(this, data.info);
         if (!Process.isIsolated()) {
             final File cacheDir = appContext.getCacheDir();
 
@@ -4274,8 +4284,7 @@ public final class ActivityThread {
             instrApp.nativeLibraryDir = ii.nativeLibraryDir;
             LoadedApk pi = getPackageInfo(instrApp, data.compatInfo,
                     appContext.getClassLoader(), false, true);
-            ContextImpl instrContext = new ContextImpl();
-            instrContext.init(pi, null, this);
+            ContextImpl instrContext = ContextImpl.createAppContext(this, pi);
 
             try {
                 java.lang.ClassLoader cl = instrContext.getClassLoader();
@@ -4890,8 +4899,8 @@ public final class ActivityThread {
                                                     UserHandle.myUserId());
             try {
                 mInstrumentation = new Instrumentation();
-                ContextImpl context = new ContextImpl();
-                context.init(getSystemContext().mPackageInfo, null, this);
+                ContextImpl context = ContextImpl.createAppContext(
+                        this, getSystemContext().mPackageInfo);
                 Application app = Instrumentation.newApplication(Application.class, context);
                 mAllApplications.add(app);
                 mInitialApplication = app;

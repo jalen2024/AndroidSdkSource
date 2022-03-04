@@ -1,4 +1,18 @@
-// Copyright 2012 Google Inc. All Rights Reserved.
+/*
+ * Copyright (C) 2014 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 package com.android.server.wm;
 
@@ -64,7 +78,7 @@ public class WindowAnimator {
     Object mLastWindowFreezeSource;
 
     SparseArray<DisplayContentsAnimator> mDisplayContentsAnimators =
-            new SparseArray<WindowAnimator.DisplayContentsAnimator>(2);
+            new SparseArray<DisplayContentsAnimator>(2);
 
     boolean mInitialized = false;
 
@@ -151,14 +165,33 @@ public class WindowAnimator {
     }
 
     private void updateAppWindowsLocked(int displayId) {
-        final DisplayContent displayContent = mService.getDisplayContentLocked(displayId);
-        final ArrayList<Task> tasks = displayContent.getTasks();
-        final int numTasks = tasks.size();
-        for (int taskNdx = 0; taskNdx < numTasks; ++taskNdx) {
-            final AppTokenList tokens = tasks.get(taskNdx).mAppTokens;
-            final int numTokens = tokens.size();
-            for (int tokenNdx = 0; tokenNdx < numTokens; ++tokenNdx) {
-                final AppWindowAnimator appAnimator = tokens.get(tokenNdx).mAppAnimator;
+        ArrayList<TaskStack> stacks = mService.getDisplayContentLocked(displayId).getStacks();
+        for (int stackNdx = stacks.size() - 1; stackNdx >= 0; --stackNdx) {
+            final TaskStack stack = stacks.get(stackNdx);
+            final ArrayList<Task> tasks = stack.getTasks();
+            for (int taskNdx = tasks.size() - 1; taskNdx >= 0; --taskNdx) {
+                final AppTokenList tokens = tasks.get(taskNdx).mAppTokens;
+                for (int tokenNdx = tokens.size() - 1; tokenNdx >= 0; --tokenNdx) {
+                    final AppWindowAnimator appAnimator = tokens.get(tokenNdx).mAppAnimator;
+                    final boolean wasAnimating = appAnimator.animation != null
+                            && appAnimator.animation != AppWindowAnimator.sDummyAnimation;
+                    if (appAnimator.stepAnimationLocked(mCurrentTime)) {
+                        mAnimating = true;
+                    } else if (wasAnimating) {
+                        // stopped animating, do one more pass through the layout
+                        setAppLayoutChanges(appAnimator,
+                                WindowManagerPolicy.FINISH_LAYOUT_REDO_WALLPAPER,
+                                "appToken " + appAnimator.mAppToken + " done");
+                        if (WindowManagerService.DEBUG_ANIM) Slog.v(TAG,
+                                "updateWindowsApps...: done animating " + appAnimator.mAppToken);
+                    }
+                }
+            }
+
+            final AppTokenList exitingAppTokens = stack.mExitingAppTokens;
+            final int NEAT = exitingAppTokens.size();
+            for (int i = 0; i < NEAT; i++) {
+                final AppWindowAnimator appAnimator = exitingAppTokens.get(i).mAppAnimator;
                 final boolean wasAnimating = appAnimator.animation != null
                         && appAnimator.animation != AppWindowAnimator.sDummyAnimation;
                 if (appAnimator.stepAnimationLocked(mCurrentTime)) {
@@ -166,27 +199,10 @@ public class WindowAnimator {
                 } else if (wasAnimating) {
                     // stopped animating, do one more pass through the layout
                     setAppLayoutChanges(appAnimator, WindowManagerPolicy.FINISH_LAYOUT_REDO_WALLPAPER,
-                            "appToken " + appAnimator.mAppToken + " done");
+                        "exiting appToken " + appAnimator.mAppToken + " done");
                     if (WindowManagerService.DEBUG_ANIM) Slog.v(TAG,
-                            "updateWindowsApps...: done animating " + appAnimator.mAppToken);
+                            "updateWindowsApps...: done animating exiting " + appAnimator.mAppToken);
                 }
-            }
-        }
-
-        final AppTokenList exitingAppTokens = displayContent.mExitingAppTokens;
-        final int NEAT = exitingAppTokens.size();
-        for (int i = 0; i < NEAT; i++) {
-            final AppWindowAnimator appAnimator = exitingAppTokens.get(i).mAppAnimator;
-            final boolean wasAnimating = appAnimator.animation != null
-                    && appAnimator.animation != AppWindowAnimator.sDummyAnimation;
-            if (appAnimator.stepAnimationLocked(mCurrentTime)) {
-                mAnimating = true;
-            } else if (wasAnimating) {
-                // stopped animating, do one more pass through the layout
-                setAppLayoutChanges(appAnimator, WindowManagerPolicy.FINISH_LAYOUT_REDO_WALLPAPER,
-                    "exiting appToken " + appAnimator.mAppToken + " done");
-                if (WindowManagerService.DEBUG_ANIM) Slog.v(TAG,
-                        "updateWindowsApps...: done animating exiting " + appAnimator.mAppToken);
             }
         }
     }
@@ -449,11 +465,6 @@ public class WindowAnimator {
         }
     }
 
-    private void performAnimationsLocked(final int displayId) {
-        updateWindowsLocked(displayId);
-        updateWallpaperLocked(displayId);
-    }
-
 
     /** Locked on mService.mWindowMap. */
     private void animateLocked() {
@@ -494,7 +505,8 @@ public class WindowAnimator {
 
                 // Update animations of all applications, including those
                 // associated with exiting/removed apps
-                performAnimationsLocked(displayId);
+                updateWindowsLocked(displayId);
+                updateWallpaperLocked(displayId);
 
                 final WindowList windows = mService.getWindowListLocked(displayId);
                 final int N = windows.size();
@@ -642,11 +654,16 @@ public class WindowAnimator {
     }
 
     int getPendingLayoutChanges(final int displayId) {
+        if (displayId < 0) {
+            return 0;
+        }
         return mService.getDisplayContentLocked(displayId).pendingLayoutChanges;
     }
 
     void setPendingLayoutChanges(final int displayId, final int changes) {
-        mService.getDisplayContentLocked(displayId).pendingLayoutChanges |= changes;
+        if (displayId >= 0) {
+            mService.getDisplayContentLocked(displayId).pendingLayoutChanges |= changes;
+        }
     }
 
     void setAppLayoutChanges(final AppWindowAnimator appAnimator, final int changes, String s) {
@@ -655,7 +672,7 @@ public class WindowAnimator {
         WindowList windows = appAnimator.mAppToken.allAppWindows;
         for (int i = windows.size() - 1; i >= 0; i--) {
             final int displayId = windows.get(i).getDisplayId();
-            if (displays.indexOfKey(displayId) < 0) {
+            if (displayId >= 0 && displays.indexOfKey(displayId) < 0) {
                 setPendingLayoutChanges(displayId, changes);
                 if (WindowManagerService.DEBUG_LAYOUT_REPEATS) {
                     mService.debugLayoutRepeats(s, getPendingLayoutChanges(displayId));
@@ -676,10 +693,15 @@ public class WindowAnimator {
     }
 
     void setScreenRotationAnimationLocked(int displayId, ScreenRotationAnimation animation) {
-        getDisplayContentsAnimatorLocked(displayId).mScreenRotationAnimation = animation;
+        if (displayId >= 0) {
+            getDisplayContentsAnimatorLocked(displayId).mScreenRotationAnimation = animation;
+        }
     }
 
     ScreenRotationAnimation getScreenRotationAnimationLocked(int displayId) {
+        if (displayId < 0) {
+            return null;
+        }
         return getDisplayContentsAnimatorLocked(displayId).mScreenRotationAnimation;
     }
 

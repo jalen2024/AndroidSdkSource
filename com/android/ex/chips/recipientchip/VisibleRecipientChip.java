@@ -32,7 +32,12 @@ public class VisibleRecipientChip extends ImageSpan implements DrawableRecipient
     private final SimpleRecipientChip mDelegate;
 
     public VisibleRecipientChip(final Drawable drawable, final RecipientEntry entry) {
-        super(drawable, DynamicDrawableSpan.ALIGN_BOTTOM);
+        this(drawable, entry, DynamicDrawableSpan.ALIGN_BOTTOM);
+    }
+
+    public VisibleRecipientChip(final Drawable drawable, final RecipientEntry entry,
+            final int verticalAlignment) {
+        super(drawable, verticalAlignment);
 
         mDelegate = new SimpleRecipientChip(entry);
     }
@@ -63,6 +68,16 @@ public class VisibleRecipientChip extends ImageSpan implements DrawableRecipient
     }
 
     @Override
+    public Long getDirectoryId() {
+        return mDelegate.getDirectoryId();
+    }
+
+    @Override
+    public String getLookupKey() {
+        return mDelegate.getLookupKey();
+    }
+
+    @Override
     public long getDataId() {
         return mDelegate.getDataId();
     }
@@ -80,11 +95,6 @@ public class VisibleRecipientChip extends ImageSpan implements DrawableRecipient
     @Override
     public CharSequence getOriginalText() {
         return mDelegate.getOriginalText();
-    }
-
-    @Override
-    public boolean isGalContact() {
-        return mDelegate.isGalContact();
     }
 
     @Override

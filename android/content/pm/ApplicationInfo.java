@@ -315,6 +315,14 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
     public static final int FLAG_IS_DATA_ONLY = 1<<24;
 
     /**
+     * Value for {@link #flags}: true if the application was declared to be a game, or
+     * false if it is a non-game application.
+     *
+     * {@hide}
+     */
+    public static final int FLAG_IS_GAME = 1<<25;
+
+    /**
      * Value for {@link #flags}: set to {@code true} if the application
      * is permitted to hold privileged permissions.
      *
@@ -474,7 +482,7 @@ public class ApplicationInfo extends PackageItemInfo implements Parcelable {
      * @hide
      */
     public int installLocation = PackageInfo.INSTALL_LOCATION_UNSPECIFIED;
-    
+
     public void dump(Printer pw, String prefix) {
         super.dumpFront(pw, prefix);
         if (className != null) {

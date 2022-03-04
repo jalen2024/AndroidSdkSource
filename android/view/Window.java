@@ -91,10 +91,15 @@ public abstract class Window {
     public static final int FEATURE_ACTION_MODE_OVERLAY = 10;
 
     /**
+     * Flag for requesting a decoration-free window that is dismissed by swiping from the left.
+     */
+    public static final int FEATURE_SWIPE_TO_DISMISS = 11;
+
+    /**
      * Max value used as a feature ID
      * @hide
      */
-    public static final int FEATURE_MAX = FEATURE_ACTION_MODE_OVERLAY;
+    public static final int FEATURE_MAX = FEATURE_SWIPE_TO_DISMISS;
 
     /** Flag for setting the progress bar's visibility to VISIBLE */
     public static final int PROGRESS_VISIBILITY_ON = -1;
@@ -129,6 +134,7 @@ public abstract class Window {
     
     private TypedArray mWindowStyle;
     private Callback mCallback;
+    private OnWindowDismissedCallback mOnWindowDismissedCallback;
     private WindowManager mWindowManager;
     private IBinder mAppToken;
     private String mAppName;
@@ -387,6 +393,15 @@ public abstract class Window {
         public void onActionModeFinished(ActionMode mode);
     }
 
+    /** @hide */
+    public interface OnWindowDismissedCallback {
+        /**
+         * Called when a window is dismissed. This informs the callback that the
+         * window is gone, and it should finish itself.
+         */
+        public void onWindowDismissed();
+    }
+
     public Window(Context context) {
         mContext = context;
     }
@@ -558,6 +573,18 @@ public abstract class Window {
      */
     public final Callback getCallback() {
         return mCallback;
+    }
+
+    /** @hide */
+    public final void setOnWindowDismissedCallback(OnWindowDismissedCallback dcb) {
+        mOnWindowDismissedCallback = dcb;
+    }
+
+    /** @hide */
+    public final void dispatchOnWindowDismissed() {
+        if (mOnWindowDismissedCallback != null) {
+            mOnWindowDismissedCallback.onWindowDismissed();
+        }
     }
 
     /**

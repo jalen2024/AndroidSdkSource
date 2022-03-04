@@ -192,10 +192,16 @@ public class ZygoteInit {
     static void closeServerSocket() {
         try {
             if (sServerSocket != null) {
+                FileDescriptor fd = sServerSocket.getFileDescriptor();
                 sServerSocket.close();
+                if (fd != null) {
+                    Libcore.os.close(fd);
+                }
             }
         } catch (IOException ex) {
             Log.e(TAG, "Zygote:  error closing sockets", ex);
+        } catch (libcore.io.ErrnoException ex) {
+            Log.e(TAG, "Zygote:  error closing descriptor", ex);
         }
 
         sServerSocket = null;
@@ -489,6 +495,7 @@ public class ZygoteInit {
     private static boolean startSystemServer()
             throws MethodAndArgsCaller, RuntimeException {
         long capabilities = posixCapabilitiesAsBits(
+            OsConstants.CAP_BLOCK_SUSPEND,
             OsConstants.CAP_KILL,
             OsConstants.CAP_NET_ADMIN,
             OsConstants.CAP_NET_BIND_SERVICE,
@@ -719,15 +726,6 @@ public class ZygoteInit {
      * @throws IOException
      */
     static native void setCloseOnExec(FileDescriptor fd, boolean flag)
-            throws IOException;
-
-    /**
-     * Retrieves the permitted capability set from another process.
-     *
-     * @param pid &gt;=0 process ID or 0 for this process
-     * @throws IOException on error
-     */
-    static native long capgetPermitted(int pid)
             throws IOException;
 
     /**

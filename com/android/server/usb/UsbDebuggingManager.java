@@ -17,8 +17,12 @@
 package com.android.server.usb;
 
 import android.content.ActivityNotFoundException;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.content.res.Resources;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
 import android.os.Handler;
@@ -208,7 +212,7 @@ public class UsbDebuggingManager implements Runnable {
                 case MESSAGE_ADB_CONFIRM: {
                     String key = (String)msg.obj;
                     mFingerprints = getFingerprints(key);
-                    showConfirmationDialog(key, mFingerprints);
+                    startConfirmation(key, mFingerprints);
                     break;
                 }
 
@@ -243,19 +247,60 @@ public class UsbDebuggingManager implements Runnable {
         return sb.toString();
     }
 
-    private void showConfirmationDialog(String key, String fingerprints) {
-        Intent dialogIntent = new Intent();
-
-        dialogIntent.setClassName("com.android.systemui",
-                "com.android.systemui.usb.UsbDebuggingActivity");
-        dialogIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        dialogIntent.putExtra("key", key);
-        dialogIntent.putExtra("fingerprints", fingerprints);
-        try {
-            mContext.startActivity(dialogIntent);
-        } catch (ActivityNotFoundException e) {
-            Slog.e(TAG, "unable to start UsbDebuggingActivity");
+    private void startConfirmation(String key, String fingerprints) {
+        String nameString = Resources.getSystem().getString(
+                com.android.internal.R.string.config_customAdbPublicKeyConfirmationComponent);
+        ComponentName componentName = ComponentName.unflattenFromString(nameString);
+        if (startConfirmationActivity(componentName, key, fingerprints)
+                || startConfirmationService(componentName, key, fingerprints)) {
+            return;
         }
+        Slog.e(TAG, "unable to start customAdbPublicKeyConfirmationComponent "
+                + nameString + " as an Activity or a Service");
+    }
+
+    /**
+     * @returns true if the componentName led to an Activity that was started.
+     */
+    private boolean startConfirmationActivity(ComponentName componentName, String key,
+            String fingerprints) {
+        PackageManager packageManager = mContext.getPackageManager();
+        Intent intent = createConfirmationIntent(componentName, key, fingerprints);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY) != null) {
+            try {
+                mContext.startActivity(intent);
+                return true;
+            } catch (ActivityNotFoundException e) {
+                Slog.e(TAG, "unable to start adb whitelist activity: " + componentName, e);
+            }
+        }
+        return false;
+    }
+
+    /**
+     * @returns true if the componentName led to a Service that was started.
+     */
+    private boolean startConfirmationService(ComponentName componentName, String key,
+            String fingerprints) {
+        Intent intent = createConfirmationIntent(componentName, key, fingerprints);
+        try {
+            if (mContext.startService(intent) != null) {
+                return true;
+            }
+        } catch (SecurityException e) {
+            Slog.e(TAG, "unable to start adb whitelist service: " + componentName, e);
+        }
+        return false;
+    }
+
+    private Intent createConfirmationIntent(ComponentName componentName, String key,
+            String fingerprints) {
+        Intent intent = new Intent();
+        intent.setClassName(componentName.getPackageName(), componentName.getClassName());
+        intent.putExtra("key", key);
+        intent.putExtra("fingerprints", fingerprints);
+        return intent;
     }
 
     private File getUserKeyFile() {

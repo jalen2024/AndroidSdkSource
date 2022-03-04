@@ -33,11 +33,11 @@ import android.view.Surface.OutOfResourcesException;
 public class SurfaceControl {
     private static final String TAG = "SurfaceControl";
 
-    private static native int nativeCreate(SurfaceSession session, String name,
+    private static native long nativeCreate(SurfaceSession session, String name,
             int w, int h, int format, int flags)
             throws OutOfResourcesException;
-    private static native void nativeRelease(int nativeObject);
-    private static native void nativeDestroy(int nativeObject);
+    private static native void nativeRelease(long nativeObject);
+    private static native void nativeDestroy(long nativeObject);
 
     private static native Bitmap nativeScreenshot(IBinder displayToken,
             int width, int height, int minLayer, int maxLayer, boolean allLayers);
@@ -48,21 +48,21 @@ public class SurfaceControl {
     private static native void nativeCloseTransaction();
     private static native void nativeSetAnimationTransaction();
 
-    private static native void nativeSetLayer(int nativeObject, int zorder);
-    private static native void nativeSetPosition(int nativeObject, float x, float y);
-    private static native void nativeSetSize(int nativeObject, int w, int h);
-    private static native void nativeSetTransparentRegionHint(int nativeObject, Region region);
-    private static native void nativeSetAlpha(int nativeObject, float alpha);
-    private static native void nativeSetMatrix(int nativeObject, float dsdx, float dtdx, float dsdy, float dtdy);
-    private static native void nativeSetFlags(int nativeObject, int flags, int mask);
-    private static native void nativeSetWindowCrop(int nativeObject, int l, int t, int r, int b);
-    private static native void nativeSetLayerStack(int nativeObject, int layerStack);
+    private static native void nativeSetLayer(long nativeObject, int zorder);
+    private static native void nativeSetPosition(long nativeObject, float x, float y);
+    private static native void nativeSetSize(long nativeObject, int w, int h);
+    private static native void nativeSetTransparentRegionHint(long nativeObject, Region region);
+    private static native void nativeSetAlpha(long nativeObject, float alpha);
+    private static native void nativeSetMatrix(long nativeObject, float dsdx, float dtdx, float dsdy, float dtdy);
+    private static native void nativeSetFlags(long nativeObject, int flags, int mask);
+    private static native void nativeSetWindowCrop(long nativeObject, int l, int t, int r, int b);
+    private static native void nativeSetLayerStack(long nativeObject, int layerStack);
 
     private static native IBinder nativeGetBuiltInDisplay(int physicalDisplayId);
     private static native IBinder nativeCreateDisplay(String name, boolean secure);
     private static native void nativeDestroyDisplay(IBinder displayToken);
     private static native void nativeSetDisplaySurface(
-            IBinder displayToken, int nativeSurfaceObject);
+            IBinder displayToken, long nativeSurfaceObject);
     private static native void nativeSetDisplayLayerStack(
             IBinder displayToken, int layerStack);
     private static native void nativeSetDisplayProjection(
@@ -77,10 +77,7 @@ public class SurfaceControl {
 
     private final CloseGuard mCloseGuard = CloseGuard.get();
     private final String mName;
-    int mNativeObject; // package visibility only for Surface.java access
-
-    private static final boolean HEADLESS = "1".equals(
-        SystemProperties.get("ro.config.headless", "0"));
+    long mNativeObject; // package visibility only for Surface.java access
 
     /* flags used in constructor (keep in sync with ISurfaceComposerClient.h) */
 
@@ -106,18 +103,18 @@ public class SurfaceControl {
      * surfaces are pre-multiplied, which means that each color component is
      * already multiplied by its alpha value. In this case the blending
      * equation used is:
-     *
-     *    DEST = SRC + DEST * (1-SRC_ALPHA)
-     *
+     * <p>
+     *    <code>DEST = SRC + DEST * (1-SRC_ALPHA)</code>
+     * <p>
      * By contrast, non pre-multiplied surfaces use the following equation:
-     *
-     *    DEST = SRC * SRC_ALPHA * DEST * (1-SRC_ALPHA)
-     *
+     * <p>
+     *    <code>DEST = SRC * SRC_ALPHA * DEST * (1-SRC_ALPHA)</code>
+     * <p>
      * pre-multiplied surfaces must always be used if transparent pixels are
      * composited on top of each-other into the surface. A pre-multiplied
      * surface can never lower the value of the alpha component of a given
      * pixel.
-     *
+     * <p>
      * In some rare situations, a non pre-multiplied surface is preferable.
      *
      */
@@ -128,7 +125,17 @@ public class SurfaceControl {
      * even if its pixel format is set to translucent. This can be useful if an
      * application needs full RGBA 8888 support for instance but will
      * still draw every pixel opaque.
-     *
+     * <p>
+     * This flag is ignored if setAlpha() is used to make the surface non-opaque.
+     * Combined effects are (assuming a buffer format with an alpha channel):
+     * <ul>
+     * <li>OPAQUE + alpha(1.0) == opaque composition
+     * <li>OPAQUE + alpha(0.x) == blended composition
+     * <li>!OPAQUE + alpha(1.0) == blended composition
+     * <li>!OPAQUE + alpha(0.x) == blended composition
+     * </ul>
+     * If the underlying buffer lacks an alpha channel, the OPAQUE flag is effectively
+     * set automatically.
      */
     public static final int OPAQUE = 0x00000400;
 
@@ -169,8 +176,15 @@ public class SurfaceControl {
     /**
      * Surface flag: Hide the surface.
      * Equivalent to calling hide().
+     * Updates the value set during Surface creation (see {@link #HIDDEN}).
      */
     public static final int SURFACE_HIDDEN = 0x01;
+
+    /**
+     * Surface flag: composite without blending when possible.
+     * Updates the value set during Surface creation (see {@link #OPAQUE}).
+     */
+    public static final int SURFACE_OPAQUE = 0x02;
 
 
     /* built-in physical display ids (keep in sync with ISurfaceComposer.h)
@@ -192,14 +206,14 @@ public class SurfaceControl {
 
     /**
      * Create a surface with a name.
-     *
+     * <p>
      * The surface creation flags specify what kind of surface to create and
      * certain options such as whether the surface can be assumed to be opaque
      * and whether it should be initially hidden.  Surfaces should always be
      * created with the {@link #HIDDEN} flag set to ensure that they are not
      * made visible prematurely before all of the surface's properties have been
      * configured.
-     *
+     * <p>
      * Good practice is to first create the surface with the {@link #HIDDEN} flag
      * specified, open a transaction, set the surface layer, layer stack, alpha,
      * and position, call {@link #show} if appropriate, and close the transaction.
@@ -231,8 +245,6 @@ public class SurfaceControl {
                     + "a transaction.  New surface name: " + name,
                     new Throwable());
         }
-
-        checkHeadless();
 
         mName = name;
         mNativeObject = nativeCreate(session, name, w, h, format, flags);
@@ -344,6 +356,10 @@ public class SurfaceControl {
         nativeSetTransparentRegionHint(mNativeObject, region);
     }
 
+    /**
+     * Sets an alpha value for the entire Surface.  This value is combined with the
+     * per-pixel alpha.  It may be used with opaque Surfaces.
+     */
     public void setAlpha(float alpha) {
         checkNotReleased();
         nativeSetAlpha(mNativeObject, alpha);
@@ -354,6 +370,13 @@ public class SurfaceControl {
         nativeSetMatrix(mNativeObject, dsdx, dtdx, dsdy, dtdy);
     }
 
+    /**
+     * Sets and clears flags, such as {@link #SURFACE_HIDDEN}.  The new value will be:
+     * <p>
+     *   <code>newFlags = (oldFlags & ~mask) | (flags & mask)</code>
+     * <p>
+     * Note this does not take the same set of flags as the constructor.
+     */
     public void setFlags(int flags, int mask) {
         checkNotReleased();
         nativeSetFlags(mNativeObject, flags, mask);
@@ -372,6 +395,19 @@ public class SurfaceControl {
     public void setLayerStack(int layerStack) {
         checkNotReleased();
         nativeSetLayerStack(mNativeObject, layerStack);
+    }
+
+    /**
+     * Sets the opacity of the surface.  Setting the flag is equivalent to creating the
+     * Surface with the {@link #OPAQUE} flag.
+     */
+    public void setOpaque(boolean isOpaque) {
+        checkNotReleased();
+        if (isOpaque) {
+            nativeSetFlags(mNativeObject, SURFACE_OPAQUE, SURFACE_OPAQUE);
+        } else {
+            nativeSetFlags(mNativeObject, 0, SURFACE_OPAQUE);
+        }
     }
 
     /*
@@ -618,11 +654,5 @@ public class SurfaceControl {
             throw new IllegalArgumentException("consumer must not be null");
         }
         nativeScreenshot(display, consumer, width, height, minLayer, maxLayer, allLayers);
-    }
-
-    private static void checkHeadless() {
-        if (HEADLESS) {
-            throw new UnsupportedOperationException("Device is headless");
-        }
     }
 }

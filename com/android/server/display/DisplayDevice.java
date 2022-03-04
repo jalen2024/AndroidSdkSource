@@ -17,6 +17,7 @@
 package com.android.server.display;
 
 import android.graphics.Rect;
+import android.hardware.display.DisplayViewport;
 import android.os.IBinder;
 import android.view.Surface;
 import android.view.SurfaceControl;
@@ -106,15 +107,9 @@ abstract class DisplayDevice {
     }
 
     /**
-     * Blanks the display, if supported.
+     * Sets the display state, if supported.
      */
-    public void blankLocked() {
-    }
-
-    /**
-     * Unblanks the display, if supported.
-     */
-    public void unblankLocked() {
+    public void requestDisplayStateLocked(int state) {
     }
 
     /**

@@ -161,9 +161,11 @@ public class ShareActionProvider extends ActionProvider {
     @Override
     public View onCreateActionView() {
         // Create the view and set its data model.
-        ActivityChooserModel dataModel = ActivityChooserModel.get(mContext, mShareHistoryFileName);
         ActivityChooserView activityChooserView = new ActivityChooserView(mContext);
-        activityChooserView.setActivityChooserModel(dataModel);
+        if (!activityChooserView.isInEditMode()) {
+            ActivityChooserModel dataModel = ActivityChooserModel.get(mContext, mShareHistoryFileName);
+            activityChooserView.setActivityChooserModel(dataModel);
+        }
 
         // Lookup and set the expand action icon.
         TypedValue outTypedValue = new TypedValue();
@@ -266,7 +268,7 @@ public class ShareActionProvider extends ActionProvider {
      * Intent shareIntent = new Intent(Intent.ACTION_SEND);
      * shareIntent.setType("image/*");
      * Uri uri = Uri.fromFile(new File(getFilesDir(), "foo.jpg"));
-     * shareIntent.putExtra(Intent.EXTRA_STREAM, uri.toString());</pre>
+     * shareIntent.putExtra(Intent.EXTRA_STREAM, uri));</pre>
      *
      * @param shareIntent The share intent.
      *

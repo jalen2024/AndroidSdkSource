@@ -460,7 +460,7 @@ public abstract class BatteryStats implements Parcelable {
         public byte batteryHealth;
         public byte batteryPlugType;
         
-        public char batteryTemperature;
+        public short batteryTemperature;
         public char batteryVoltage;
         
         // Constants from SCREEN_BRIGHTNESS_*
@@ -537,7 +537,7 @@ public abstract class BatteryStats implements Parcelable {
             batteryHealth = (byte)((bat>>20)&0xf);
             batteryPlugType = (byte)((bat>>24)&0xf);
             bat = src.readInt();
-            batteryTemperature = (char)(bat&0xffff);
+            batteryTemperature = (short)(bat&0xffff);
             batteryVoltage = (char)((bat>>16)&0xffff);
             states = src.readInt();
         }
@@ -606,7 +606,7 @@ public abstract class BatteryStats implements Parcelable {
                 if (DEBUG) Slog.i(TAG, "WRITE DELTA: batteryToken=0x"
                         + Integer.toHexString(batteryLevelInt)
                         + " batteryLevel=" + batteryLevel
-                        + " batteryTemp=" + (int)batteryTemperature
+                        + " batteryTemp=" + batteryTemperature
                         + " batteryVolt=" + (int)batteryVoltage);
             }
             if (stateIntChanged) {
@@ -621,8 +621,8 @@ public abstract class BatteryStats implements Parcelable {
         }
         
         private int buildBatteryLevelInt() {
-            return ((((int)batteryLevel)<<24)&0xff000000)
-                    | ((((int)batteryTemperature)<<14)&0x00ffc000)
+            return ((((int)batteryLevel)<<25)&0xfe000000)
+                    | ((((int)batteryTemperature)<<14)&0x01ffc000)
                     | (((int)batteryVoltage)&0x00003fff);
         }
         
@@ -658,13 +658,13 @@ public abstract class BatteryStats implements Parcelable {
             
             if ((firstToken&DELTA_BATTERY_LEVEL_FLAG) != 0) {
                 int batteryLevelInt = src.readInt();
-                batteryLevel = (byte)((batteryLevelInt>>24)&0xff);
-                batteryTemperature = (char)((batteryLevelInt>>14)&0x3ff);
+                batteryLevel = (byte)((batteryLevelInt>>25)&0x7f);
+                batteryTemperature = (short)((batteryLevelInt<<7)>>21);
                 batteryVoltage = (char)(batteryLevelInt&0x3fff);
                 if (DEBUG) Slog.i(TAG, "READ DELTA: batteryToken=0x"
                         + Integer.toHexString(batteryLevelInt)
                         + " batteryLevel=" + batteryLevel
-                        + " batteryTemp=" + (int)batteryTemperature
+                        + " batteryTemp=" + batteryTemperature
                         + " batteryVolt=" + (int)batteryVoltage);
             }
             
@@ -782,7 +782,9 @@ public abstract class BatteryStats implements Parcelable {
      * {@hide}
      */
     public abstract long getScreenOnTime(long batteryRealtime, int which);
-    
+
+    public abstract long getInteractiveTime(long batteryRealtime, int which);
+
     public static final int SCREEN_BRIGHTNESS_DARK = 0;
     public static final int SCREEN_BRIGHTNESS_DIM = 1;
     public static final int SCREEN_BRIGHTNESS_MEDIUM = 2;
@@ -804,8 +806,6 @@ public abstract class BatteryStats implements Parcelable {
     public abstract long getScreenBrightnessTime(int brightnessBin,
             long batteryRealtime, int which);
 
-    public abstract int getInputEventCount(int which);
-    
     /**
      * Returns the time in microseconds that the phone has been on while the device was
      * running on battery.
@@ -1303,7 +1303,7 @@ public abstract class BatteryStats implements Parcelable {
                 wifiRunningTime / 1000, bluetoothOnTime / 1000,
                 mobileRxTotal, mobileTxTotal, wifiRxTotal, wifiTxTotal,
                 fullWakeLockTimeTotal, partialWakeLockTimeTotal,
-                getInputEventCount(which));
+                0 /*legacy input event count*/);
         
         // Dump screen brightness stats
         Object[] args = new Object[NUM_SCREEN_BRIGHTNESS_BINS];
@@ -1564,16 +1564,22 @@ public abstract class BatteryStats implements Parcelable {
         pw.println(sb.toString());
         
         final long screenOnTime = getScreenOnTime(batteryRealtime, which);
+        final long interactiveTime = getInteractiveTime(batteryRealtime, which);
         final long phoneOnTime = getPhoneOnTime(batteryRealtime, which);
         final long wifiRunningTime = getGlobalWifiRunningTime(batteryRealtime, which);
         final long wifiOnTime = getWifiOnTime(batteryRealtime, which);
         final long bluetoothOnTime = getBluetoothOnTime(batteryRealtime, which);
         sb.setLength(0);
         sb.append(prefix);
+                sb.append("  Interactive: "); formatTimeMs(sb, interactiveTime / 1000);
+                sb.append("("); sb.append(formatRatioLocked(interactiveTime, whichBatteryRealtime));
+                sb.append(")");
+        pw.println(sb.toString());
+        sb.setLength(0);
+        sb.append(prefix);
                 sb.append("  Screen on: "); formatTimeMs(sb, screenOnTime / 1000);
                 sb.append("("); sb.append(formatRatioLocked(screenOnTime, whichBatteryRealtime));
-                sb.append("), Input events: "); sb.append(getInputEventCount(which));
-                sb.append(", Active phone call: "); formatTimeMs(sb, phoneOnTime / 1000);
+                sb.append("), Active phone call: "); formatTimeMs(sb, phoneOnTime / 1000);
                 sb.append("("); sb.append(formatRatioLocked(phoneOnTime, whichBatteryRealtime));
                 sb.append(")");
         pw.println(sb.toString());

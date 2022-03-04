@@ -38,10 +38,11 @@ import com.android.internal.content.PackageHelper;
 import com.android.internal.util.FastPrintWriter;
 import com.android.internal.util.FastXmlSerializer;
 import com.android.internal.util.XmlUtils;
-import com.android.server.DeviceStorageMonitorService;
 import com.android.server.EventLogTags;
 import com.android.server.IntentResolver;
+import com.android.server.ServiceThread;
 
+import com.android.server.LocalServices;
 import com.android.server.Watchdog;
 import org.xmlpull.v1.XmlPullParser;
 import org.xmlpull.v1.XmlPullParserException;
@@ -92,6 +93,7 @@ import android.content.pm.VerificationParams;
 import android.content.pm.VerifierDeviceIdentity;
 import android.content.pm.VerifierInfo;
 import android.content.res.Resources;
+import android.hardware.display.DisplayManager;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Build;
@@ -127,7 +129,6 @@ import android.util.Slog;
 import android.util.SparseArray;
 import android.util.Xml;
 import android.view.Display;
-import android.view.WindowManager;
 
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -162,6 +163,7 @@ import libcore.io.Libcore;
 import libcore.io.StructStat;
 
 import com.android.internal.R;
+import com.android.server.storage.DeviceStorageMonitorInternal;
 
 /**
  * Keep track of all those .apks everywhere.
@@ -217,6 +219,7 @@ public class PackageManagerService extends IPackageManager.Stub {
     static final int SCAN_UPDATE_TIME = 1<<6;
     static final int SCAN_DEFER_DEX = 1<<7;
     static final int SCAN_BOOTING = 1<<8;
+    static final int SCAN_DELETE_DATA_ON_FAILURES = 1<<9;
 
     static final int REMOVE_CHATTY = 1<<16;
 
@@ -259,8 +262,7 @@ public class PackageManagerService extends IPackageManager.Stub {
 
     static final String mTempContainerPrefix = "smdl2tmp";
 
-    final HandlerThread mHandlerThread = new HandlerThread("PackageManager",
-            Process.THREAD_PRIORITY_BACKGROUND);
+    final ServiceThread mHandlerThread;
     final PackageHandler mHandler;
 
     final int mSdkVersion = Build.VERSION.SDK_INT;
@@ -332,7 +334,6 @@ public class PackageManagerService extends IPackageManager.Stub {
             new HashMap<String, PackageParser.Package>();
 
     // Information for the parser to write more useful error messages.
-    File mScanningPath;
     int mLastScanError;
 
     // ----------------------------------------------------------------
@@ -867,7 +868,7 @@ public class PackageManagerService extends IPackageManager.Stub {
                                     int[] uidArray = new int[] { res.pkg.applicationInfo.uid };
                                     ArrayList<String> pkgList = new ArrayList<String>(1);
                                     pkgList.add(res.pkg.applicationInfo.packageName);
-                                    sendResourcesChangedBroadcast(true, false,
+                                    sendResourcesChangedBroadcast(true, true,
                                             pkgList,uidArray, null);
                                 }
                             }
@@ -1067,6 +1068,12 @@ public class PackageManagerService extends IPackageManager.Stub {
         return res;
     }
 
+    private static void getDefaultDisplayMetrics(Context context, DisplayMetrics metrics) {
+        DisplayManager displayManager = (DisplayManager) context.getSystemService(
+                Context.DISPLAY_SERVICE);
+        displayManager.getDisplay(Display.DEFAULT_DISPLAY).getMetrics(metrics);
+    }
+
     public PackageManagerService(Context context, Installer installer,
             boolean factoryTest, boolean onlyCore) {
         EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_START,
@@ -1114,17 +1121,16 @@ public class PackageManagerService extends IPackageManager.Stub {
 
         mInstaller = installer;
 
-        WindowManager wm = (WindowManager)context.getSystemService(Context.WINDOW_SERVICE);
-        Display d = wm.getDefaultDisplay();
-        d.getMetrics(mMetrics);
+        getDefaultDisplayMetrics(context, mMetrics);
 
         synchronized (mInstallLock) {
         // writer
         synchronized (mPackages) {
+            mHandlerThread = new ServiceThread(TAG,
+                    Process.THREAD_PRIORITY_BACKGROUND, true /*allowIo*/);
             mHandlerThread.start();
             mHandler = new PackageHandler(mHandlerThread.getLooper());
-            Watchdog.getInstance().addThread(mHandler, mHandlerThread.getName(),
-                    WATCHDOG_TIMEOUT);
+            Watchdog.getInstance().addThread(mHandler, WATCHDOG_TIMEOUT);
 
             File dataDir = Environment.getDataDirectory();
             mAppDataDir = new File(dataDir, "data");
@@ -2540,15 +2546,41 @@ public class PackageManagerService extends IPackageManager.Stub {
         }
     }
 
+    /**
+     * Compares two sets of signatures. Returns:
+     * <br />
+     * {@link PackageManager#SIGNATURE_NEITHER_SIGNED}: if both signature sets are null,
+     * <br />
+     * {@link PackageManager#SIGNATURE_FIRST_NOT_SIGNED}: if the first signature set is null,
+     * <br />
+     * {@link PackageManager#SIGNATURE_SECOND_NOT_SIGNED}: if the second signature set is null,
+     * <br />
+     * {@link PackageManager#SIGNATURE_MATCH}: if the two signature sets are identical,
+     * <br />
+     * {@link PackageManager#SIGNATURE_NO_MATCH}: if the two signature sets differ.
+     */
     static int compareSignatures(Signature[] s1, Signature[] s2) {
         if (s1 == null) {
             return s2 == null
                     ? PackageManager.SIGNATURE_NEITHER_SIGNED
                     : PackageManager.SIGNATURE_FIRST_NOT_SIGNED;
         }
+
         if (s2 == null) {
             return PackageManager.SIGNATURE_SECOND_NOT_SIGNED;
         }
+
+        if (s1.length != s2.length) {
+            return PackageManager.SIGNATURE_NO_MATCH;
+        }
+
+        // Since both signature sets are of size 1, we can compare without HashSets.
+        if (s1.length == 1) {
+            return s1[0].equals(s2[0]) ?
+                    PackageManager.SIGNATURE_MATCH :
+                    PackageManager.SIGNATURE_NO_MATCH;
+        }
+
         HashSet<Signature> set1 = new HashSet<Signature>();
         for (Signature sig : s1) {
             set1.add(sig);
@@ -3657,6 +3689,12 @@ public class PackageManagerService extends IPackageManager.Stub {
             // An updated system app will not have the PARSE_IS_SYSTEM flag set
             // initially
             parseFlags |= PackageParser.PARSE_IS_SYSTEM;
+
+            // An updated privileged app will not have the PARSE_IS_PRIVILEGED
+            // flag set initially
+            if ((updatedPkg.pkgFlags & ApplicationInfo.FLAG_PRIVILEGED) != 0) {
+                parseFlags |= PackageParser.PARSE_IS_PRIVILEGED;
+            }
         }
         // Verify certificates against what was last scanned
         if (!collectCertificatesLI(pp, ps, pkg, scanFile, parseFlags)) {
@@ -3993,7 +4031,7 @@ public class PackageManagerService extends IPackageManager.Stub {
         for (int user : users) {
             if (user != 0) {
                 res = mInstaller.createUserData(packageName,
-                        UserHandle.getUid(user, uid), user);
+                        UserHandle.getUid(user, uid), user, seinfo);
                 if (res < 0) {
                     return res;
                 }
@@ -4138,7 +4176,6 @@ public class PackageManagerService extends IPackageManager.Stub {
             mLastScanError = PackageManager.INSTALL_FAILED_INVALID_APK;
             return null;
         }
-        mScanningPath = scanFile;
 
         if ((parseFlags&PackageParser.PARSE_IS_SYSTEM) != 0) {
             pkg.applicationInfo.flags |= ApplicationInfo.FLAG_SYSTEM;
@@ -4158,7 +4195,7 @@ public class PackageManagerService extends IPackageManager.Stub {
                 if (mAndroidApplication != null) {
                     Slog.w(TAG, "*************************************************");
                     Slog.w(TAG, "Core android package being redefined.  Skipping.");
-                    Slog.w(TAG, " file=" + mScanningPath);
+                    Slog.w(TAG, " file=" + scanFile);
                     Slog.w(TAG, "*************************************************");
                     mLastScanError = PackageManager.INSTALL_FAILED_DUPLICATE_PACKAGE;
                     return null;
@@ -4638,6 +4675,10 @@ public class PackageManagerService extends IPackageManager.Stub {
         if ((scanMode&SCAN_NO_DEX) == 0) {
             if (performDexOptLI(pkg, forceDex, (scanMode&SCAN_DEFER_DEX) != 0, false)
                     == DEX_OPT_FAILED) {
+                if ((scanMode & SCAN_DELETE_DATA_ON_FAILURES) != 0) {
+                    removeDataDirsLI(pkg.packageName);
+                }
+
                 mLastScanError = PackageManager.INSTALL_FAILED_DEXOPT;
                 return null;
             }
@@ -4715,6 +4756,10 @@ public class PackageManagerService extends IPackageManager.Stub {
                     PackageParser.Package clientPkg = clientLibPkgs.get(i);
                     if (performDexOptLI(clientPkg, forceDex, (scanMode&SCAN_DEFER_DEX) != 0, false)
                             == DEX_OPT_FAILED) {
+                        if ((scanMode & SCAN_DELETE_DATA_ON_FAILURES) != 0) {
+                            removeDataDirsLI(pkg.packageName);
+                        }
+
                         mLastScanError = PackageManager.INSTALL_FAILED_DEXOPT;
                         return null;
                     }
@@ -7339,6 +7384,15 @@ public class PackageManagerService extends IPackageManager.Stub {
             return pkgLite.recommendedInstallLocation;
         }
 
+        private long getMemoryLowThreshold() {
+            final DeviceStorageMonitorInternal
+                    dsm = LocalServices.getService(DeviceStorageMonitorInternal.class);
+            if (dsm == null) {
+                return 0L;
+            }
+            return dsm.getMemoryLowThreshold();
+        }
+
         /*
          * Invoke remote method to get package information and install
          * location values. Override install location based on default
@@ -7356,15 +7410,9 @@ public class PackageManagerService extends IPackageManager.Stub {
                 Slog.w(TAG, "Conflicting flags specified for installing on both internal and external");
                 ret = PackageManager.INSTALL_FAILED_INVALID_INSTALL_LOCATION;
             } else {
-                final long lowThreshold;
-
-                final DeviceStorageMonitorService dsm = (DeviceStorageMonitorService) ServiceManager
-                        .getService(DeviceStorageMonitorService.SERVICE);
-                if (dsm == null) {
+                final long lowThreshold = getMemoryLowThreshold();
+                if (lowThreshold == 0L) {
                     Log.w(TAG, "Couldn't get low memory threshold; no free limit imposed");
-                    lowThreshold = 0L;
-                } else {
-                    lowThreshold = dsm.getMemoryLowThreshold();
                 }
 
                 try {
@@ -7922,8 +7970,8 @@ public class PackageManagerService extends IPackageManager.Stub {
         boolean checkFreeStorage(IMediaContainerService imcs) throws RemoteException {
             final long lowThreshold;
 
-            final DeviceStorageMonitorService dsm = (DeviceStorageMonitorService) ServiceManager
-                    .getService(DeviceStorageMonitorService.SERVICE);
+            final DeviceStorageMonitorInternal
+                    dsm = LocalServices.getService(DeviceStorageMonitorInternal.class);
             if (dsm == null) {
                 Log.w(TAG, "Couldn't get low memory threshold; no free limit imposed");
                 lowThreshold = 0L;
@@ -9069,7 +9117,7 @@ public class PackageManagerService extends IPackageManager.Stub {
             replacePackageLI(pkg, parseFlags, scanMode, args.user,
                     installerPackageName, res);
         } else {
-            installNewPackageLI(pkg, parseFlags, scanMode, args.user,
+            installNewPackageLI(pkg, parseFlags, scanMode | SCAN_DELETE_DATA_ON_FAILURES, args.user,
                     installerPackageName, res);
         }
         synchronized (mPackages) {
@@ -9738,10 +9786,10 @@ public class PackageManagerService extends IPackageManager.Stub {
                 clearExternalStorageDataSync(packageName, userId, true);
                 if (succeeded) {
                     // invoke DeviceStorageMonitor's update method to clear any notifications
-                    DeviceStorageMonitorService dsm = (DeviceStorageMonitorService)
-                            ServiceManager.getService(DeviceStorageMonitorService.SERVICE);
+                    DeviceStorageMonitorInternal
+                            dsm = LocalServices.getService(DeviceStorageMonitorInternal.class);
                     if (dsm != null) {
-                        dsm.updateMemory();
+                        dsm.checkMemory();
                     }
                 }
                 if(observer != null) {
@@ -10576,7 +10624,8 @@ public class PackageManagerService extends IPackageManager.Stub {
 
         DumpState dumpState = new DumpState();
         boolean fullPreferred = false;
-        
+        boolean checkin = false;
+
         String packageName = null;
         
         int opti = 0;
@@ -10590,7 +10639,8 @@ public class PackageManagerService extends IPackageManager.Stub {
                 // Right now we only know how to print all.
             } else if ("-h".equals(opt)) {
                 pw.println("Package manager dump options:");
-                pw.println("  [-h] [-f] [cmd] ...");
+                pw.println("  [-h] [-f] [--checkin] [cmd] ...");
+                pw.println("    --checkin: dump for a checkin");
                 pw.println("    -f: print details of intent filters");
                 pw.println("    -h: print this help");
                 pw.println("  cmd may be one of:");
@@ -10608,13 +10658,15 @@ public class PackageManagerService extends IPackageManager.Stub {
                 pw.println("    <package.name>: info about given package");
                 pw.println("    k[eysets]: print known keysets");
                 return;
+            } else if ("--checkin".equals(opt)) {
+                checkin = true;
             } else if ("-f".equals(opt)) {
                 dumpState.setOptionEnabled(DumpState.OPTION_SHOW_FILTERS);
             } else {
                 pw.println("Unknown argument: " + opt + "; use -h for help");
             }
         }
-        
+
         // Is the caller requesting to dump a particular piece of data?
         if (opti < args.length) {
             String cmd = args[opti];
@@ -10656,17 +10708,26 @@ public class PackageManagerService extends IPackageManager.Stub {
             }
         }
 
+        if (checkin) {
+            pw.println("vers,1");
+        }
+
         // reader
         synchronized (mPackages) {
             if (dumpState.isDumping(DumpState.DUMP_VERIFIERS) && packageName == null) {
-                if (dumpState.onTitlePrinted())
-                    pw.println();
-                pw.println("Verifiers:");
-                pw.print("  Required: ");
-                pw.print(mRequiredVerifierPackage);
-                pw.print(" (uid=");
-                pw.print(getPackageUid(mRequiredVerifierPackage, 0));
-                pw.println(")");
+                if (!checkin) {
+                    if (dumpState.onTitlePrinted())
+                        pw.println();
+                    pw.println("Verifiers:");
+                    pw.print("  Required: ");
+                    pw.print(mRequiredVerifierPackage);
+                    pw.print(" (uid=");
+                    pw.print(getPackageUid(mRequiredVerifierPackage, 0));
+                    pw.println(")");
+                } else if (mRequiredVerifierPackage != null) {
+                    pw.print("vrfy,"); pw.print(mRequiredVerifierPackage);
+                    pw.print(","); pw.println(getPackageUid(mRequiredVerifierPackage, 0));
+                }
             }
 
             if (dumpState.isDumping(DumpState.DUMP_LIBS) && packageName == null) {
@@ -10675,21 +10736,37 @@ public class PackageManagerService extends IPackageManager.Stub {
                 while (it.hasNext()) {
                     String name = it.next();
                     SharedLibraryEntry ent = mSharedLibraries.get(name);
-                    if (!printedHeader) {
-                        if (dumpState.onTitlePrinted())
-                            pw.println();
-                        pw.println("Libraries:");
-                        printedHeader = true;
-                    }
-                    pw.print("  ");
-                    pw.print(name);
-                    pw.print(" -> ");
-                    if (ent.path != null) {
-                        pw.print("(jar) ");
-                        pw.print(ent.path);
+                    if (!checkin) {
+                        if (!printedHeader) {
+                            if (dumpState.onTitlePrinted())
+                                pw.println();
+                            pw.println("Libraries:");
+                            printedHeader = true;
+                        }
+                        pw.print("  ");
                     } else {
-                        pw.print("(apk) ");
-                        pw.print(ent.apk);
+                        pw.print("lib,");
+                    }
+                    pw.print(name);
+                    if (!checkin) {
+                        pw.print(" -> ");
+                    }
+                    if (ent.path != null) {
+                        if (!checkin) {
+                            pw.print("(jar) ");
+                            pw.print(ent.path);
+                        } else {
+                            pw.print(",jar,");
+                            pw.print(ent.path);
+                        }
+                    } else {
+                        if (!checkin) {
+                            pw.print("(apk) ");
+                            pw.print(ent.apk);
+                        } else {
+                            pw.print(",apk,");
+                            pw.print(ent.apk);
+                        }
                     }
                     pw.println();
                 }
@@ -10698,16 +10775,22 @@ public class PackageManagerService extends IPackageManager.Stub {
             if (dumpState.isDumping(DumpState.DUMP_FEATURES) && packageName == null) {
                 if (dumpState.onTitlePrinted())
                     pw.println();
-                pw.println("Features:");
+                if (!checkin) {
+                    pw.println("Features:");
+                }
                 Iterator<String> it = mAvailableFeatures.keySet().iterator();
                 while (it.hasNext()) {
                     String name = it.next();
-                    pw.print("  ");
+                    if (!checkin) {
+                        pw.print("  ");
+                    } else {
+                        pw.print("feat,");
+                    }
                     pw.println(name);
                 }
             }
 
-            if (dumpState.isDumping(DumpState.DUMP_RESOLVERS)) {
+            if (!checkin && dumpState.isDumping(DumpState.DUMP_RESOLVERS)) {
                 if (mActivities.dump(pw, dumpState.getTitlePrinted() ? "\nActivity Resolver Table:"
                         : "Activity Resolver Table:", "  ", packageName,
                         dumpState.isOptionEnabled(DumpState.OPTION_SHOW_FILTERS))) {
@@ -10730,7 +10813,7 @@ public class PackageManagerService extends IPackageManager.Stub {
                 }
             }
 
-            if (dumpState.isDumping(DumpState.DUMP_PREFERRED)) {
+            if (!checkin && dumpState.isDumping(DumpState.DUMP_PREFERRED)) {
                 for (int i=0; i<mSettings.mPreferredActivities.size(); i++) {
                     PreferredIntentResolver pir = mSettings.mPreferredActivities.valueAt(i);
                     int user = mSettings.mPreferredActivities.keyAt(i);
@@ -10744,7 +10827,7 @@ public class PackageManagerService extends IPackageManager.Stub {
                 }
             }
 
-            if (dumpState.isDumping(DumpState.DUMP_PREFERRED_XML)) {
+            if (!checkin && dumpState.isDumping(DumpState.DUMP_PREFERRED_XML)) {
                 pw.flush();
                 FileOutputStream fout = new FileOutputStream(fd);
                 BufferedOutputStream str = new BufferedOutputStream(fout);
@@ -10766,11 +10849,11 @@ public class PackageManagerService extends IPackageManager.Stub {
                 }
             }
 
-            if (dumpState.isDumping(DumpState.DUMP_PERMISSIONS)) {
+            if (!checkin && dumpState.isDumping(DumpState.DUMP_PERMISSIONS)) {
                 mSettings.dumpPermissionsLPr(pw, packageName, dumpState);
             }
 
-            if (dumpState.isDumping(DumpState.DUMP_PROVIDERS)) {
+            if (!checkin && dumpState.isDumping(DumpState.DUMP_PROVIDERS)) {
                 boolean printedSomething = false;
                 for (PackageParser.Provider p : mProviders.mProviders.values()) {
                     if (packageName != null && !packageName.equals(p.info.packageName)) {
@@ -10807,19 +10890,19 @@ public class PackageManagerService extends IPackageManager.Stub {
                 }
             }
 
-            if (dumpState.isDumping(DumpState.DUMP_KEYSETS)) {
+            if (!checkin && dumpState.isDumping(DumpState.DUMP_KEYSETS)) {
                 mSettings.mKeySetManager.dump(pw, packageName, dumpState);
             }
 
             if (dumpState.isDumping(DumpState.DUMP_PACKAGES)) {
-                mSettings.dumpPackagesLPr(pw, packageName, dumpState);
+                mSettings.dumpPackagesLPr(pw, packageName, dumpState, checkin);
             }
 
-            if (dumpState.isDumping(DumpState.DUMP_SHARED_USERS)) {
+            if (!checkin && dumpState.isDumping(DumpState.DUMP_SHARED_USERS)) {
                 mSettings.dumpSharedUsersLPr(pw, packageName, dumpState);
             }
 
-            if (dumpState.isDumping(DumpState.DUMP_MESSAGES) && packageName == null) {
+            if (!checkin && dumpState.isDumping(DumpState.DUMP_MESSAGES) && packageName == null) {
                 if (dumpState.onTitlePrinted())
                     pw.println();
                 mSettings.dumpReadMessagesLPr(pw, dumpState);
@@ -11058,7 +11141,7 @@ public class PackageManagerService extends IPackageManager.Stub {
             if (uidArr != null) {
                 extras.putIntArray(Intent.EXTRA_CHANGED_UID_LIST, uidArr);
             }
-            if (replacing && !mediaStatus) {
+            if (replacing) {
                 extras.putBoolean(Intent.EXTRA_REPLACING, replacing);
             }
             String action = mediaStatus ? Intent.ACTION_EXTERNAL_APPLICATIONS_AVAILABLE
@@ -11566,12 +11649,17 @@ public class PackageManagerService extends IPackageManager.Stub {
         return true;
     }
 
+    @Override
     public boolean isStorageLow() {
         final long token = Binder.clearCallingIdentity();
         try {
-            final DeviceStorageMonitorService dsm = (DeviceStorageMonitorService) ServiceManager
-                    .getService(DeviceStorageMonitorService.SERVICE);
-            return dsm.isMemoryLow();
+            final DeviceStorageMonitorInternal
+                    dsm = LocalServices.getService(DeviceStorageMonitorInternal.class);
+            if (dsm != null) {
+                return dsm.isMemoryLow();
+            } else {
+                return false;
+            }
         } finally {
             Binder.restoreCallingIdentity(token);
         }

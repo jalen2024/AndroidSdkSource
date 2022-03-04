@@ -360,7 +360,7 @@ public class CdmaLteServiceStateTracker extends CdmaServiceStateTracker {
         }
 
         if (hasChanged) {
-            if (mPhone.isEriFileLoaded()) {
+            if ((mCi.getRadioState().isOn()) && (mPhone.isEriFileLoaded())) {
                 String eriText;
                 // Now the CDMAPhone sees the new ServiceState so it can get the
                 // new ERI text
@@ -406,6 +406,8 @@ public class CdmaLteServiceStateTracker extends CdmaServiceStateTracker {
                     SystemProperties.get(TelephonyProperties.PROPERTY_OPERATOR_NUMERIC, "");
             operatorNumeric = mSS.getOperatorNumeric();
             mPhone.setSystemProperty(TelephonyProperties.PROPERTY_OPERATOR_NUMERIC, operatorNumeric);
+            updateCarrierMccMncConfiguration(operatorNumeric,
+                    prevOperatorNumeric, mPhone.getContext());
 
             if (operatorNumeric == null) {
                 if (DBG) log("operatorNumeric is null");

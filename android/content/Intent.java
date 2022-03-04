@@ -844,7 +844,7 @@ public class Intent implements Parcelable, Cloneable {
      * {@link #FLAG_GRANT_WRITE_URI_PERMISSION}, then these flags will also be
      * set in the returned chooser intent, with its ClipData set appropriately:
      * either a direct reflection of {@link #getClipData()} if that is non-null,
-     * or a new ClipData build from {@link #getData()}.
+     * or a new ClipData built from {@link #getData()}.
      *
      * @param target The Intent that the user will be selecting an activity
      * to perform.
@@ -1414,15 +1414,38 @@ public class Intent implements Parcelable, Cloneable {
     // Standard intent broadcast actions (see action variable).
 
     /**
-     * Broadcast Action: Sent after the screen turns off.
+     * Broadcast Action: Sent when the device goes to sleep and becomes non-interactive.
+     * <p>
+     * For historical reasons, the name of this broadcast action refers to the power
+     * state of the screen but it is actually sent in response to changes in the
+     * overall interactive state of the device.
+     * </p><p>
+     * This broadcast is sent when the device becomes non-interactive which may have
+     * nothing to do with the screen turning off.  To determine the
+     * actual state of the screen, use {@link android.view.Display#getState}.
+     * </p><p>
+     * See {@link android.os.PowerManager#isInteractive} for details.
+     * </p>
      *
      * <p class="note">This is a protected intent that can only be sent
      * by the system.
      */
     @SdkConstant(SdkConstantType.BROADCAST_INTENT_ACTION)
     public static final String ACTION_SCREEN_OFF = "android.intent.action.SCREEN_OFF";
+
     /**
-     * Broadcast Action: Sent after the screen turns on.
+     * Broadcast Action: Sent when the device wakes up and becomes interactive.
+     * <p>
+     * For historical reasons, the name of this broadcast action refers to the power
+     * state of the screen but it is actually sent in response to changes in the
+     * overall interactive state of the device.
+     * </p><p>
+     * This broadcast is sent when the device becomes interactive which may have
+     * nothing to do with the screen turning on.  To determine the
+     * actual state of the screen, use {@link android.view.Display#getState}.
+     * </p><p>
+     * See {@link android.os.PowerManager#isInteractive} for details.
+     * </p>
      *
      * <p class="note">This is a protected intent that can only be sent
      * by the system.
@@ -2765,6 +2788,13 @@ public class Intent implements Parcelable, Cloneable {
     @SdkConstant(SdkConstantType.INTENT_CATEGORY)
     public static final String CATEGORY_LAUNCHER = "android.intent.category.LAUNCHER";
     /**
+     * Indicates an activity optimized for Leanback mode, and that should
+     * be displayed in the Leanback launcher.
+     * @hide
+     */
+    @SdkConstant(SdkConstantType.INTENT_CATEGORY)
+    public static final String CATEGORY_LEANBACK_LAUNCHER = "android.intent.category.LEANBACK_LAUNCHER";
+    /**
      * Provides information about the package it is in; typically used if
      * a package does not contain a {@link #CATEGORY_LAUNCHER} to provide
      * a front-door to the user without having to be shown in the all apps list.
@@ -3537,6 +3567,11 @@ public class Intent implements Parcelable, Cloneable {
      * the user re-launching it from home), this activity and all on top of
      * it will be finished so that the user does not return to them, but
      * instead returns to whatever activity preceeded it.
+     *
+     * <p>When this flag is assigned to the root activity all activities up
+     * to, but not including the root activity, will be cleared. This prevents
+     * this flag from being used to finish all activities in a task and thereby
+     * ending the task.
      *
      * <p>This is useful for cases where you have a logical break in your
      * application.  For example, an e-mail application may have a command
@@ -4415,7 +4450,7 @@ public class Intent implements Parcelable, Cloneable {
      * Return the {@link ClipData} associated with this Intent.  If there is
      * none, returns null.  See {@link #setClipData} for more information.
      *
-     * @see #setClipData;
+     * @see #setClipData
      */
     public ClipData getClipData() {
         return mClipData;
@@ -5431,7 +5466,7 @@ public class Intent implements Parcelable, Cloneable {
      * directly used by Intent.  Applications should generally rely on the
      * MIME type of the Intent itself, not what it may find in the ClipData.
      * A common practice is to construct a ClipData for use with an Intent
-     * with a MIME type of "*\/*".
+     * with a MIME type of "*&#47;*".
      *
      * @param clip The new clip to set.  May be null to clear the current clip.
      */
@@ -7153,8 +7188,8 @@ public class Intent implements Parcelable, Cloneable {
      *
      * @param type MIME data type to normalize
      * @return normalized MIME data type, or null if the input was null
-     * @see {@link #setType}
-     * @see {@link #setTypeAndNormalize}
+     * @see #setType
+     * @see #setTypeAndNormalize
      */
     public static String normalizeMimeType(String type) {
         if (type == null) {

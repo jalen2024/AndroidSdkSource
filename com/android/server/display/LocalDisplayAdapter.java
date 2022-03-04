@@ -96,13 +96,21 @@ final class LocalDisplayAdapter extends DisplayAdapter {
         }
     }
 
+    static boolean shouldBlank(int state) {
+        return state == Display.STATE_OFF;
+    }
+
+    static boolean shouldUnblank(int state) {
+        return state == Display.STATE_ON || state == Display.STATE_DOZING;
+    }
+
     private final class LocalDisplayDevice extends DisplayDevice {
         private final int mBuiltInDisplayId;
         private final SurfaceControl.PhysicalDisplayInfo mPhys;
 
         private DisplayDeviceInfo mInfo;
         private boolean mHavePendingChanges;
-        private boolean mBlanked;
+        private int mState = Display.STATE_UNKNOWN;
 
         public LocalDisplayDevice(IBinder displayToken, int builtInDisplayId,
                 SurfaceControl.PhysicalDisplayInfo phys) {
@@ -135,6 +143,7 @@ final class LocalDisplayAdapter extends DisplayAdapter {
                 mInfo.width = mPhys.width;
                 mInfo.height = mPhys.height;
                 mInfo.refreshRate = mPhys.refreshRate;
+                mInfo.state = mState;
 
                 // Assume that all built-in displays that have secure output (eg. HDCP) also
                 // support compositing from gralloc protected buffers.
@@ -172,15 +181,16 @@ final class LocalDisplayAdapter extends DisplayAdapter {
         }
 
         @Override
-        public void blankLocked() {
-            mBlanked = true;
-            SurfaceControl.blankDisplay(getDisplayTokenLocked());
-        }
-
-        @Override
-        public void unblankLocked() {
-            mBlanked = false;
-            SurfaceControl.unblankDisplay(getDisplayTokenLocked());
+        public void requestDisplayStateLocked(int state) {
+            if (mState != state) {
+                if (shouldBlank(state) && !shouldBlank(mState)) {
+                    SurfaceControl.blankDisplay(getDisplayTokenLocked());
+                } else if (shouldUnblank(state) && !shouldUnblank(mState)) {
+                    SurfaceControl.unblankDisplay(getDisplayTokenLocked());
+                }
+                mState = state;
+                updateDeviceInfoLocked();
+            }
         }
 
         @Override
@@ -188,7 +198,12 @@ final class LocalDisplayAdapter extends DisplayAdapter {
             super.dumpLocked(pw);
             pw.println("mBuiltInDisplayId=" + mBuiltInDisplayId);
             pw.println("mPhys=" + mPhys);
-            pw.println("mBlanked=" + mBlanked);
+            pw.println("mState=" + Display.stateToString(mState));
+        }
+
+        private void updateDeviceInfoLocked() {
+            mInfo = null;
+            sendDisplayDeviceEventLocked(this, DISPLAY_DEVICE_EVENT_CHANGED);
         }
     }
 

@@ -140,7 +140,7 @@ public class ImageProcessingActivity extends Activity
         CROSS_PROCESS_USING_LUT ("CrossProcess (using LUT)"),
         CONVOLVE_5X5 ("Convolve 5x5"),
         INTRINSICS_CONVOLVE_5X5 ("Intrinsics Convolve 5x5"),
-        MANDELBROT ("Mandelbrot"),
+        MANDELBROT_FLOAT ("Mandelbrot fp32"),
         INTRINSICS_BLEND ("Intrinsics Blend"),
         INTRINSICS_BLUR_25G ("Intrinsics Blur 25 uchar"),
         VIBRANCE ("Vibrance"),
@@ -153,7 +153,10 @@ public class ImageProcessingActivity extends Activity
         COLOR_CUBE_3D_INTRINSIC ("Color Cube (3D LUT intrinsic)"),
         USAGE_IO ("Usage io"),
         ARTISTIC_1("Artistic 1"),
-        HISTOGRAM ("Histogram");
+        HISTOGRAM ("Histogram"),
+        MANDELBROT_DOUBLE ("Mandelbrot fp64"),
+        RESIZE_BICUBIC_SCRIPT ("Resize BiCubic Script"),
+        RESIZE_BICUBIC_INTRINSIC ("Resize BiCubic Intrinsic");
 
 
         private final String name;
@@ -184,12 +187,9 @@ public class ImageProcessingActivity extends Activity
     private TextView mText4;
     private TextView mText5;
 
-    private float mSaturation = 1.0f;
-
     private TextView mBenchmarkResult;
     private Spinner mTestSpinner;
 
-    private SurfaceView mSurfaceView;
     private ImageView mDisplayView;
 
     private boolean mDoingBenchmark;
@@ -378,8 +378,8 @@ public class ImageProcessingActivity extends Activity
         case INTRINSICS_CONVOLVE_5X5:
             mTest = new Convolve5x5(true);
             break;
-        case MANDELBROT:
-            mTest = new Mandelbrot();
+        case MANDELBROT_FLOAT:
+            mTest = new Mandelbrot(false);
             break;
         case INTRINSICS_BLEND:
             mTest = new Blend();
@@ -420,6 +420,15 @@ public class ImageProcessingActivity extends Activity
         case HISTOGRAM:
             mTest = new Histogram();
             break;
+        case MANDELBROT_DOUBLE:
+            mTest = new Mandelbrot(true);
+            break;
+        case RESIZE_BICUBIC_SCRIPT:
+            mTest = new Resize(false);
+            break;
+        case RESIZE_BICUBIC_INTRINSIC:
+            mTest = new Resize(true);
+            break;
         }
 
         mTest.createBaseTest(this, mBitmapIn, mBitmapIn2, mBitmapOut);
@@ -451,8 +460,6 @@ public class ImageProcessingActivity extends Activity
         mBitmapIn2 = loadBitmap(R.drawable.img1600x1067b);
         mBitmapOut = Bitmap.createBitmap(mBitmapIn.getWidth(), mBitmapIn.getHeight(),
                                          mBitmapIn.getConfig());
-
-        mSurfaceView = (SurfaceView) findViewById(R.id.surface);
 
         mDisplayView = (ImageView) findViewById(R.id.display);
         mDisplayView.setImageBitmap(mBitmapOut);
@@ -622,6 +629,7 @@ public class ImageProcessingActivity extends Activity
 
         mTest.exitBenchmark();
         mDoingBenchmark = false;
+
         return ft;
     }
 }

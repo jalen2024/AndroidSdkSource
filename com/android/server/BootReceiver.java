@@ -106,10 +106,20 @@ public class BootReceiver extends BroadcastReceiver {
             .append("Kernel: ")
             .append(FileUtils.readTextFile(new File("/proc/version"), 1024, "...\n"))
             .append("\n").toString();
+        final String bootReason = SystemProperties.get("ro.boot.bootreason", null);
 
         String recovery = RecoverySystem.handleAftermath();
         if (recovery != null && db != null) {
             db.addText("SYSTEM_RECOVERY_LOG", headers + recovery);
+        }
+
+        String lastKmsgFooter = "";
+        if (bootReason != null) {
+            lastKmsgFooter = new StringBuilder(512)
+                .append("\n")
+                .append("Boot info:\n")
+                .append("Last boot reason: ").append(bootReason).append("\n")
+                .toString();
         }
 
         if (SystemProperties.getLong("ro.runtime.firstboot", 0) == 0) {
@@ -118,8 +128,11 @@ public class BootReceiver extends BroadcastReceiver {
             if (db != null) db.addText("SYSTEM_BOOT", headers);
 
             // Negative sizes mean to take the *tail* of the file (see FileUtils.readTextFile())
-            addFileToDropBox(db, prefs, headers, "/proc/last_kmsg",
-                    -LOG_SIZE, "SYSTEM_LAST_KMSG");
+            addFileWithFootersToDropBox(db, prefs, headers, lastKmsgFooter,
+                    "/proc/last_kmsg", -LOG_SIZE, "SYSTEM_LAST_KMSG");
+            addFileWithFootersToDropBox(db, prefs, headers, lastKmsgFooter,
+                    "/sys/fs/pstore/console-ramoops", -LOG_SIZE,
+                    "SYSTEM_LAST_KMSG");
             addFileToDropBox(db, prefs, headers, "/cache/recovery/log",
                     -LOG_SIZE, "SYSTEM_RECOVERY_LOG");
             addFileToDropBox(db, prefs, headers, "/data/dontpanic/apanic_console",
@@ -159,6 +172,14 @@ public class BootReceiver extends BroadcastReceiver {
     private static void addFileToDropBox(
             DropBoxManager db, SharedPreferences prefs,
             String headers, String filename, int maxSize, String tag) throws IOException {
+        addFileWithFootersToDropBox(db, prefs, headers, "", filename, maxSize,
+                tag);
+    }
+
+    private static void addFileWithFootersToDropBox(
+            DropBoxManager db, SharedPreferences prefs,
+            String headers, String footers, String filename, int maxSize,
+            String tag) throws IOException {
         if (db == null || !db.isTagEnabled(tag)) return;  // Logging disabled
 
         File file = new File(filename);
@@ -174,7 +195,7 @@ public class BootReceiver extends BroadcastReceiver {
         }
 
         Slog.i(TAG, "Copying " + filename + " to DropBox (" + tag + ")");
-        db.addText(tag, headers + FileUtils.readTextFile(file, maxSize, "[[TRUNCATED]]\n"));
+        db.addText(tag, headers + FileUtils.readTextFile(file, maxSize, "[[TRUNCATED]]\n") + footers);
     }
 
     private static void addAuditErrorsToDropBox(DropBoxManager db,  SharedPreferences prefs,
@@ -184,6 +205,11 @@ public class BootReceiver extends BroadcastReceiver {
 
         File file = new File("/proc/last_kmsg");
         long fileTime = file.lastModified();
+        if (fileTime <= 0) {
+            file = new File("/sys/fs/pstore/console-ramoops");
+            fileTime = file.lastModified();
+        }
+
         if (fileTime <= 0) return;  // File does not exist
 
         if (prefs != null) {

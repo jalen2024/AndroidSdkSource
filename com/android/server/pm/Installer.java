@@ -16,6 +16,9 @@
 
 package com.android.server.pm;
 
+import com.android.server.SystemService;
+
+import android.content.Context;
 import android.content.pm.PackageStats;
 import android.net.LocalSocket;
 import android.net.LocalSocketAddress;
@@ -25,20 +28,27 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 
-public final class Installer {
+public final class Installer extends SystemService {
     private static final String TAG = "Installer";
 
     private static final boolean LOCAL_DEBUG = false;
 
     InputStream mIn;
-
     OutputStream mOut;
-
     LocalSocket mSocket;
 
     byte buf[] = new byte[1024];
-
     int buflen = 0;
+
+    public Installer(Context context) {
+        super(context);
+    }
+
+    @Override
+    public void onStart() {
+        Slog.i(TAG, "Waiting for installd to be ready.");
+        ping();
+    }
 
     private boolean connect() {
         if (mSocket != null) {
@@ -265,7 +275,7 @@ public final class Installer {
         return execute(builder.toString());
     }
 
-    public int createUserData(String name, int uid, int userId) {
+    public int createUserData(String name, int uid, int userId, String seinfo) {
         StringBuilder builder = new StringBuilder("mkuserdata");
         builder.append(' ');
         builder.append(name);
@@ -273,6 +283,8 @@ public final class Installer {
         builder.append(uid);
         builder.append(' ');
         builder.append(userId);
+        builder.append(' ');
+        builder.append(seinfo != null ? seinfo : "!");
         return execute(builder.toString());
     }
 

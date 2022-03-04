@@ -2269,6 +2269,16 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     static final int PFLAG3_CALLED_SUPER = 0x10;
 
 
+    /**
+     * Flag indicating that we're in the process of applying window insets.
+     */
+    static final int PFLAG3_APPLYING_INSETS = 0x40;
+
+    /**
+     * Flag indicating that we're in the process of fitting system windows using the old method.
+     */
+    static final int PFLAG3_FITTING_SYSTEM_WINDOWS = 0x80;
+
     /* End of masks for mPrivateFlags3 */
 
     static final int DRAG_MASK = PFLAG2_DRAG_CAN_ACCEPT | PFLAG2_DRAG_HOVERED;
@@ -3178,6 +3188,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         private OnDragListener mOnDragListener;
 
         private OnSystemUiVisibilityChangeListener mOnSystemUiVisibilityChangeListener;
+
+        OnApplyWindowInsetsListener mOnApplyWindowInsetsListener;
     }
 
     ListenerInfo mListenerInfo;
@@ -5903,8 +5915,37 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @see #getFitsSystemWindows()
      * @see #setFitsSystemWindows(boolean) 
      * @see #setSystemUiVisibility(int)
+     *
+     * @deprecated As of API XX use {@link #dispatchApplyWindowInsets(WindowInsets)} to apply
+     * insets to views. Views should override {@link #onApplyWindowInsets(WindowInsets)} or use
+     * {@link #setOnApplyWindowInsetsListener(android.view.View.OnApplyWindowInsetsListener)}
+     * to implement handling their own insets.
      */
     protected boolean fitSystemWindows(Rect insets) {
+        if ((mPrivateFlags3 & PFLAG3_APPLYING_INSETS) == 0) {
+            if (insets == null) {
+                // Null insets by definition have already been consumed.
+                // This call cannot apply insets since there are none to apply,
+                // so return false.
+                return false;
+            }
+            // If we're not in the process of dispatching the newer apply insets call,
+            // that means we're not in the compatibility path. Dispatch into the newer
+            // apply insets path and take things from there.
+            try {
+                mPrivateFlags3 |= PFLAG3_FITTING_SYSTEM_WINDOWS;
+                return dispatchApplyWindowInsets(new WindowInsets(insets)).isConsumed();
+            } finally {
+                mPrivateFlags3 &= PFLAG3_FITTING_SYSTEM_WINDOWS;
+            }
+        } else {
+            // We're being called from the newer apply insets path.
+            // Perform the standard fallback behavior.
+            return fitSystemWindowsInt(insets);
+        }
+    }
+
+    private boolean fitSystemWindowsInt(Rect insets) {
         if ((mViewFlags & FITS_SYSTEM_WINDOWS) == FITS_SYSTEM_WINDOWS) {
             mUserPaddingStart = UNDEFINED_PADDING;
             mUserPaddingEnd = UNDEFINED_PADDING;
@@ -5921,6 +5962,97 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             return res;
         }
         return false;
+    }
+
+    /**
+     * Called when the view should apply {@link WindowInsets} according to its internal policy.
+     *
+     * <p>This method should be overridden by views that wish to apply a policy different from or
+     * in addition to the default behavior. Clients that wish to force a view subtree
+     * to apply insets should call {@link #dispatchApplyWindowInsets(WindowInsets)}.</p>
+     *
+     * <p>Clients may supply an {@link OnApplyWindowInsetsListener} to a view. If one is set
+     * it will be called during dispatch instead of this method. The listener may optionally
+     * call this method from its own implementation if it wishes to apply the view's default
+     * insets policy in addition to its own.</p>
+     *
+     * <p>Implementations of this method should either return the insets parameter unchanged
+     * or a new {@link WindowInsets} cloned from the supplied insets with any insets consumed
+     * that this view applied itself. This allows new inset types added in future platform
+     * versions to pass through existing implementations unchanged without being erroneously
+     * consumed.</p>
+     *
+     * <p>By default if a view's {@link #setFitsSystemWindows(boolean) fitsSystemWindows}
+     * property is set then the view will consume the system window insets and apply them
+     * as padding for the view.</p>
+     *
+     * @param insets Insets to apply
+     * @return The supplied insets with any applied insets consumed
+     */
+    public WindowInsets onApplyWindowInsets(WindowInsets insets) {
+        if ((mPrivateFlags3 & PFLAG3_FITTING_SYSTEM_WINDOWS) == 0) {
+            // We weren't called from within a direct call to fitSystemWindows,
+            // call into it as a fallback in case we're in a class that overrides it
+            // and has logic to perform.
+            if (fitSystemWindows(insets.getSystemWindowInsets())) {
+                return insets.consumeSystemWindowInsets();
+            }
+        } else {
+            // We were called from within a direct call to fitSystemWindows.
+            if (fitSystemWindowsInt(insets.getSystemWindowInsets())) {
+                return insets.consumeSystemWindowInsets();
+            }
+        }
+        return insets;
+    }
+
+    /**
+     * Set an {@link OnApplyWindowInsetsListener} to take over the policy for applying
+     * window insets to this view. The listener's
+     * {@link OnApplyWindowInsetsListener#onApplyWindowInsets(View, WindowInsets) onApplyWindowInsets}
+     * method will be called instead of the view's
+     * {@link #onApplyWindowInsets(WindowInsets) onApplyWindowInsets} method.
+     *
+     * @param listener Listener to set
+     *
+     * @see #onApplyWindowInsets(WindowInsets)
+     */
+    public void setOnApplyWindowInsetsListener(OnApplyWindowInsetsListener listener) {
+        getListenerInfo().mOnApplyWindowInsetsListener = listener;
+    }
+
+    /**
+     * Request to apply the given window insets to this view or another view in its subtree.
+     *
+     * <p>This method should be called by clients wishing to apply insets corresponding to areas
+     * obscured by window decorations or overlays. This can include the status and navigation bars,
+     * action bars, input methods and more. New inset categories may be added in the future.
+     * The method returns the insets provided minus any that were applied by this view or its
+     * children.</p>
+     *
+     * <p>Clients wishing to provide custom behavior should override the
+     * {@link #onApplyWindowInsets(WindowInsets)} method or alternatively provide a
+     * {@link OnApplyWindowInsetsListener} via the
+     * {@link #setOnApplyWindowInsetsListener(View.OnApplyWindowInsetsListener) setOnApplyWindowInsetsListener}
+     * method.</p>
+     *
+     * <p>This method replaces the older {@link #fitSystemWindows(Rect) fitSystemWindows} method.
+     * </p>
+     *
+     * @param insets Insets to apply
+     * @return The provided insets minus the insets that were consumed
+     */
+    public WindowInsets dispatchApplyWindowInsets(WindowInsets insets) {
+        try {
+            mPrivateFlags3 |= PFLAG3_APPLYING_INSETS;
+            if (mListenerInfo != null && mListenerInfo.mOnApplyWindowInsetsListener != null) {
+                return mListenerInfo.mOnApplyWindowInsetsListener.onApplyWindowInsets(this, insets);
+            } else {
+                return onApplyWindowInsets(insets);
+            }
+        } finally {
+            mPrivateFlags3 &= ~PFLAG3_APPLYING_INSETS;
+        }
     }
 
     /**
@@ -5995,11 +6127,19 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
 
     /**
      * Ask that a new dispatch of {@link #fitSystemWindows(Rect)} be performed.
+     * @deprecated Use {@link #requestApplyInsets()} for newer platform versions.
      */
     public void requestFitSystemWindows() {
         if (mParent != null) {
             mParent.requestFitSystemWindows();
         }
+    }
+
+    /**
+     * Ask that a new dispatch of {@link #onApplyWindowInsets(WindowInsets)} be performed.
+     */
+    public void requestApplyInsets() {
+        requestFitSystemWindows();
     }
 
     /**
@@ -6543,7 +6683,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @attr ref android.R.styleable#View_filterTouchesWhenObscured
      */
     public void setFilterTouchesWhenObscured(boolean enabled) {
-        setFlags(enabled ? 0 : FILTER_TOUCHES_WHEN_OBSCURED,
+        setFlags(enabled ? FILTER_TOUCHES_WHEN_OBSCURED : 0,
                 FILTER_TOUCHES_WHEN_OBSCURED);
     }
 
@@ -8186,7 +8326,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         boolean result = false;
 
-        if (KeyEvent.isConfirmKey(keyCode)) {
+        if (event.isConfirmKey()) {
             if ((mViewFlags & ENABLED_MASK) == DISABLED) {
                 return true;
             }
@@ -8228,7 +8368,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * @param event   The KeyEvent object that defines the button action.
      */
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (KeyEvent.isConfirmKey(keyCode)) {
+        if (event.isConfirmKey()) {
             if ((mViewFlags & ENABLED_MASK) == DISABLED) {
                 return true;
             }
@@ -9060,9 +9200,9 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      */
     public interface OnLayoutChangeListener {
         /**
-         * Called when the focus state of a view has changed.
+         * Called when the layout bounds of a view changes due to layout processing.
          *
-         * @param v The view whose state has changed.
+         * @param v The view whose bounds have changed.
          * @param left The new value of the view's left property.
          * @param top The new value of the view's top property.
          * @param right The new value of the view's right property.
@@ -9493,6 +9633,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -9544,6 +9685,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -9595,6 +9737,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -9638,6 +9781,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -9681,6 +9825,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -9866,6 +10011,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 if (mDisplayList != null) {
                     mDisplayList.setAlpha(getFinalAlpha());
                 }
+                notifyViewAccessibilityStateChangedIfNeeded(
+                        AccessibilityEvent.CONTENT_CHANGE_TYPE_UNDEFINED);
             }
         }
     }
@@ -10299,11 +10446,12 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
     /**
-     * The horizontal location of this view relative to its {@link #getTop() top} position.
+     * The vertical location of this view relative to its {@link #getTop() top} position.
      * This position is post-layout, in addition to wherever the object's
      * layout placed it.
      *
@@ -10340,6 +10488,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 // View was rejected last time it was drawn by its parent; this may have changed
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -10486,6 +10635,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 }
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -10534,6 +10684,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
                 }
                 invalidateParentIfNeeded();
             }
+            notifySubtreeAccessibilityStateChangedIfNeeded();
         }
     }
 
@@ -16499,7 +16650,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             } else {
                 long value = mMeasureCache.valueAt(cacheIndex);
                 // Casting a long to int drops the high 32 bits, no mask needed
-                setMeasuredDimension((int) (value >> 32), (int) value);
+                setMeasuredDimensionRaw((int) (value >> 32), (int) value);
                 mPrivateFlags3 |= PFLAG3_MEASURE_NEEDED_BEFORE_LAYOUT;
             }
 
@@ -16594,6 +16745,22 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             measuredWidth  += optical ? opticalWidth  : -opticalWidth;
             measuredHeight += optical ? opticalHeight : -opticalHeight;
         }
+        setMeasuredDimensionRaw(measuredWidth, measuredHeight);
+    }
+
+    /**
+     * Sets the measured dimension without extra processing for things like optical bounds.
+     * Useful for reapplying consistent values that have already been cooked with adjustments
+     * for optical bounds, etc. such as those from the measurement cache.
+     *
+     * @param measuredWidth The measured width of this view.  May be a complex
+     * bit mask as defined by {@link #MEASURED_SIZE_MASK} and
+     * {@link #MEASURED_STATE_TOO_SMALL}.
+     * @param measuredHeight The measured height of this view.  May be a complex
+     * bit mask as defined by {@link #MEASURED_SIZE_MASK} and
+     * {@link #MEASURED_STATE_TOO_SMALL}.
+     */
+    private void setMeasuredDimensionRaw(int measuredWidth, int measuredHeight) {
         mMeasuredWidth = measuredWidth;
         mMeasuredHeight = measuredHeight;
 
@@ -16824,8 +16991,8 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
             // If the screen is off assume the animation start time is now instead of
             // the next frame we draw. Keeping the START_ON_FIRST_FRAME start time
             // would cause the animation to start when the screen turns back on
-            if (mAttachInfo != null && !mAttachInfo.mScreenOn &&
-                    animation.getStartTime() == Animation.START_ON_FIRST_FRAME) {
+            if (mAttachInfo != null && mAttachInfo.mDisplayState == Display.STATE_OFF
+                    && animation.getStartTime() == Animation.START_ON_FIRST_FRAME) {
                 animation.setStartTime(AnimationUtils.currentAnimationTimeMillis());
             }
             animation.reset();
@@ -18361,7 +18528,18 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         }
 
         static int adjust(int measureSpec, int delta) {
-            return makeMeasureSpec(getSize(measureSpec + delta), getMode(measureSpec));
+            final int mode = getMode(measureSpec);
+            if (mode == UNSPECIFIED) {
+                // No need to adjust size for UNSPECIFIED mode.
+                return makeMeasureSpec(0, UNSPECIFIED);
+            }
+            int size = getSize(measureSpec) + delta;
+            if (size < 0) {
+                Log.e(VIEW_LOG_TAG, "MeasureSpec.adjust: new size would be negative! (" + size +
+                        ") spec: " + toString(measureSpec) + " delta: " + delta);
+                size = 0;
+            }
+            return makeMeasureSpec(size, mode);
         }
 
         /**
@@ -18641,6 +18819,31 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         public void onViewDetachedFromWindow(View v);
     }
 
+    /**
+     * Listener for applying window insets on a view in a custom way.
+     *
+     * <p>Apps may choose to implement this interface if they want to apply custom policy
+     * to the way that window insets are treated for a view. If an OnApplyWindowInsetsListener
+     * is set, its
+     * {@link OnApplyWindowInsetsListener#onApplyWindowInsets(View, WindowInsets) onApplyWindowInsets}
+     * method will be called instead of the View's own
+     * {@link #onApplyWindowInsets(WindowInsets) onApplyWindowInsets} method. The listener
+     * may optionally call the parameter View's <code>onApplyWindowInsets</code> method to apply
+     * the View's normal behavior as part of its own.</p>
+     */
+    public interface OnApplyWindowInsetsListener {
+        /**
+         * When {@link View#setOnApplyWindowInsetsListener(View.OnApplyWindowInsetsListener) set}
+         * on a View, this listener method will be called instead of the view's own
+         * {@link View#onApplyWindowInsets(WindowInsets) onApplyWindowInsets} method.
+         *
+         * @param v The view applying window insets
+         * @param insets The insets to apply
+         * @return The insets supplied, minus any insets that were consumed
+         */
+        public WindowInsets onApplyWindowInsets(View v, WindowInsets insets);
+    }
+
     private final class UnsetPressedState implements Runnable {
         public void run() {
             setPressed(false);
@@ -18686,7 +18889,7 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
      * A set of information given to a view when it is attached to its parent
      * window.
      */
-    static class AttachInfo {
+    final static class AttachInfo {
         interface Callbacks {
             void playSoundEffect(int effectId);
             boolean performHapticFeedback(int effectId, boolean always);
@@ -18752,7 +18955,14 @@ public class View implements Drawable.Callback, KeyEvent.Callback,
         boolean mHardwareAccelerationRequested;
         HardwareRenderer mHardwareRenderer;
 
-        boolean mScreenOn;
+        /**
+         * The state of the display to which the window is attached, as reported
+         * by {@link Display#getState()}.  Note that the display state constants
+         * declared by {@link Display} do not exactly line up with the screen state
+         * constants declared by {@link View} (there are more display states than
+         * screen states).
+         */
+        int mDisplayState = Display.STATE_UNKNOWN;
 
         /**
          * Scale factor used by the compatibility mode

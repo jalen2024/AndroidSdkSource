@@ -18,7 +18,7 @@ package android.app;
 
 import android.app.ActivityManager.RunningTaskInfo;
 import android.app.ActivityManager.RunningServiceInfo;
-import android.app.ActivityManager.StackBoxInfo;
+import android.app.ActivityManager.StackInfo;
 import android.content.ComponentName;
 import android.content.ContentProviderNative;
 import android.content.IContentProvider;
@@ -36,6 +36,7 @@ import android.content.pm.ProviderInfo;
 import android.content.pm.UserInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
+import android.graphics.Rect;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Debug;
@@ -117,12 +118,10 @@ public interface IActivityManager extends IInterface {
     public void moveTaskToBack(int task) throws RemoteException;
     public boolean moveActivityTaskToBack(IBinder token, boolean nonRoot) throws RemoteException;
     public void moveTaskBackwards(int task) throws RemoteException;
-    public int createStack(int taskId, int relativeStackBoxId, int position, float weight)
-            throws RemoteException;
     public void moveTaskToStack(int taskId, int stackId, boolean toTop) throws RemoteException;
-    public void resizeStackBox(int stackBoxId, float weight) throws RemoteException;
-    public List<StackBoxInfo> getStackBoxes() throws RemoteException;
-    public StackBoxInfo getStackBoxInfo(int stackBoxId) throws RemoteException;
+    public void resizeStack(int stackId, Rect bounds) throws RemoteException;
+    public List<StackInfo> getAllStackInfos() throws RemoteException;
+    public StackInfo getStackInfo(int stackId) throws RemoteException;
     public void setFocusedStack(int stackId) throws RemoteException;
     public int getTaskForActivity(IBinder token, boolean onlyRoot) throws RemoteException;
     /* oneway */
@@ -229,8 +228,6 @@ public interface IActivityManager extends IInterface {
     public void forceStopPackage(final String packageName, int userId) throws RemoteException;
     
     // Note: probably don't want to allow applications access to these.
-    public void goingToSleep() throws RemoteException;
-    public void wakingUp() throws RemoteException;
     public void setLockScreenShown(boolean shown) throws RemoteException;
 
     public void unhandledBack() throws RemoteException;
@@ -250,8 +247,6 @@ public interface IActivityManager extends IInterface {
     public boolean killProcessesBelowForeground(String reason) throws RemoteException;
 
     // Special low-level communication with activity manager.
-    public void startRunning(String pkg, String cls, String action,
-            String data) throws RemoteException;
     public void handleApplicationCrash(IBinder app,
             ApplicationErrorReport.CrashInfo crashInfo) throws RemoteException;
     public boolean handleApplicationWtf(IBinder app, String tag,
@@ -408,6 +403,18 @@ public interface IActivityManager extends IInterface {
 
     public void performIdleMaintenance() throws RemoteException;
 
+    /** @hide */
+    public IActivityContainer createActivityContainer(IBinder parentActivityToken,
+            IActivityContainerCallback callback) throws RemoteException;
+
+    /** @hide */
+    public void deleteActivityContainer(IActivityContainer container) throws RemoteException;
+
+    public IActivityContainer getEnclosingActivityContainer(IBinder activityToken)
+            throws RemoteException;
+
+    public IBinder getHomeActivityToken() throws RemoteException;
+
     /*
      * Private non-Binder interfaces
      */
@@ -514,7 +521,6 @@ public interface IActivityManager extends IInterface {
 
     // Please keep these transaction codes the same -- they are also
     // sent by C++ code.
-    int START_RUNNING_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION;
     int HANDLE_APPLICATION_CRASH_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+1;
     int START_ACTIVITY_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+2;
     int UNHANDLED_BACK_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+3;
@@ -550,8 +556,6 @@ public interface IActivityManager extends IInterface {
     int UNBIND_SERVICE_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+36;
     int PUBLISH_SERVICE_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+37;
     int ACTIVITY_RESUMED_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+38;
-    int GOING_TO_SLEEP_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+39;
-    int WAKING_UP_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+40;
     int SET_DEBUG_APP_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+41;
     int SET_ALWAYS_FINISH_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+42;
     int START_INSTRUMENTATION_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+43;
@@ -678,12 +682,12 @@ public interface IActivityManager extends IInterface {
     int KILL_UID_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+164;
     int SET_USER_IS_MONKEY_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+165;
     int HANG_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+166;
-    int CREATE_STACK_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+167;
+    int CREATE_ACTIVITY_CONTAINER_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+167;
     int MOVE_TASK_TO_STACK_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+168;
     int RESIZE_STACK_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+169;
-    int GET_STACK_BOXES_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+170;
+    int GET_ALL_STACK_INFOS_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+170;
     int SET_FOCUSED_STACK_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+171;
-    int GET_STACK_BOX_INFO_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+172;
+    int GET_STACK_INFO_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+172;
     int CONVERT_FROM_TRANSLUCENT_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+173;
     int CONVERT_TO_TRANSLUCENT_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+174;
     int NOTIFY_ACTIVITY_DRAWN_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+175;
@@ -694,4 +698,7 @@ public interface IActivityManager extends IInterface {
     int RELEASE_PERSISTABLE_URI_PERMISSION_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+180;
     int GET_PERSISTED_URI_PERMISSIONS_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+181;
     int APP_NOT_RESPONDING_VIA_PROVIDER_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+182;
+    int GET_HOME_ACTIVITY_TOKEN_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+183;
+    int GET_ACTIVITY_CONTAINER_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+184;
+    int DELETE_ACTIVITY_CONTAINER_TRANSACTION = IBinder.FIRST_CALL_TRANSACTION+185;
 }

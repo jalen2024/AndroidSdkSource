@@ -153,8 +153,12 @@ public class BitmapFactory {
          *
          * <p>This does not affect bitmaps without an alpha channel.</p>
          *
+         * <p>Setting this flag to false while setting {@link #inScaled} to true
+         * may result in incorrect colors.</p>
+         *
          * @see Bitmap#hasAlpha()
          * @see Bitmap#isPremultiplied()
+         * @see #inScaled
          */
         public boolean inPremultiplied;
 
@@ -249,6 +253,9 @@ public class BitmapFactory {
          * <p>This flag is turned on by default and should be turned off if you need
          * a non-scaled version of the bitmap.  Nine-patch bitmaps ignore this
          * flag and are always scaled.
+         *
+         * <p>If {@link #inPremultiplied} is set to false, and the image has alpha,
+         * setting this flag to true may result in incorrect colors.
          */
         public boolean inScaled;
 
@@ -469,7 +476,7 @@ public class BitmapFactory {
      *
      * @param res The resources object containing the image data
      * @param id The resource id of the image data
-     * @return The decoded bitmap, or null if the image could not be decode.
+     * @return The decoded bitmap, or null if the image could not be decoded.
      */
     public static Bitmap decodeResource(Resources res, int id) {
         return decodeResource(res, id, null);
@@ -517,7 +524,7 @@ public class BitmapFactory {
      * @param offset offset into imageData for where the decoder should begin
      *               parsing.
      * @param length the number of bytes, beginning at offset, to parse
-     * @return The decoded bitmap, or null if the image could not be decode.
+     * @return The decoded bitmap, or null if the image could not be decoded.
      */
     public static Bitmap decodeByteArray(byte[] data, int offset, int length) {
         return decodeByteArray(data, offset, length, null);
@@ -583,7 +590,7 @@ public class BitmapFactory {
         Trace.traceBegin(Trace.TRACE_TAG_GRAPHICS, "decodeBitmap");
         try {
             if (is instanceof AssetManager.AssetInputStream) {
-                final int asset = ((AssetManager.AssetInputStream) is).getAssetInt();
+                final long asset = ((AssetManager.AssetInputStream) is).getNativeAsset();
                 bm = nativeDecodeAsset(asset, outPadding, opts);
             } else {
                 bm = decodeStreamInternal(is, outPadding, opts);
@@ -686,7 +693,7 @@ public class BitmapFactory {
             Rect padding, Options opts);
     private static native Bitmap nativeDecodeFileDescriptor(FileDescriptor fd,
             Rect padding, Options opts);
-    private static native Bitmap nativeDecodeAsset(int asset, Rect padding, Options opts);
+    private static native Bitmap nativeDecodeAsset(long nativeAsset, Rect padding, Options opts);
     private static native Bitmap nativeDecodeByteArray(byte[] data, int offset,
             int length, Options opts);
     private static native boolean nativeIsSeekable(FileDescriptor fd);

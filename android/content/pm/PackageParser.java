@@ -58,7 +58,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.jar.JarEntry;
-import java.util.jar.JarFile;
+import java.util.jar.StrictJarFile;
 import java.util.zip.ZipEntry;
 
 import com.android.internal.util.XmlUtils;
@@ -167,18 +167,20 @@ public class PackageParser {
         final int labelRes;
         final int iconRes;
         final int logoRes;
+        final int bannerRes;
         
         String tag;
         TypedArray sa;
         
         ParsePackageItemArgs(Package _owner, String[] _outError,
-                int _nameRes, int _labelRes, int _iconRes, int _logoRes) {
+                int _nameRes, int _labelRes, int _iconRes, int _logoRes, int _bannerRes) {
             owner = _owner;
             outError = _outError;
             nameRes = _nameRes;
             labelRes = _labelRes;
             iconRes = _iconRes;
             logoRes = _logoRes;
+            bannerRes = _bannerRes;
         }
     }
     
@@ -190,10 +192,10 @@ public class PackageParser {
         int flags;
         
         ParseComponentArgs(Package _owner, String[] _outError,
-                int _nameRes, int _labelRes, int _iconRes, int _logoRes,
+                int _nameRes, int _labelRes, int _iconRes, int _logoRes, int _bannerRes,
                 String[] _sepProcesses, int _processRes,
                 int _descriptionRes, int _enabledRes) {
-            super(_owner, _outError, _nameRes, _labelRes, _iconRes, _logoRes);
+            super(_owner, _outError, _nameRes, _labelRes, _iconRes, _logoRes, _bannerRes);
             sepProcesses = _sepProcesses;
             processRes = _processRes;
             descriptionRes = _descriptionRes;
@@ -456,7 +458,7 @@ public class PackageParser {
         return pi;
     }
 
-    private Certificate[] loadCertificates(JarFile jarFile, JarEntry je,
+    private Certificate[] loadCertificates(StrictJarFile jarFile, ZipEntry je,
             byte[] readBuffer) {
         try {
             // We must read the stream for the JarEntry to retrieve
@@ -466,13 +468,11 @@ public class PackageParser {
                 // not using
             }
             is.close();
-            return je != null ? je.getCertificates() : null;
+            return je != null ? jarFile.getCertificates(je) : null;
         } catch (IOException e) {
-            Slog.w(TAG, "Exception reading " + je.getName() + " in "
-                    + jarFile.getName(), e);
+            Slog.w(TAG, "Exception reading " + je.getName() + " in " + jarFile, e);
         } catch (RuntimeException e) {
-            Slog.w(TAG, "Exception reading " + je.getName() + " in "
-                    + jarFile.getName(), e);
+            Slog.w(TAG, "Exception reading " + je.getName() + " in " + jarFile, e);
         }
         return null;
     }
@@ -591,9 +591,9 @@ public class PackageParser {
      */
     public boolean collectManifestDigest(Package pkg) {
         try {
-            final JarFile jarFile = new JarFile(mArchiveSourcePath);
+            final StrictJarFile jarFile = new StrictJarFile(mArchiveSourcePath);
             try {
-                final ZipEntry je = jarFile.getEntry(ANDROID_MANIFEST_FILENAME);
+                final ZipEntry je = jarFile.findEntry(ANDROID_MANIFEST_FILENAME);
                 if (je != null) {
                     pkg.manifestDigest = ManifestDigest.fromInputStream(jarFile.getInputStream(je));
                 }
@@ -624,7 +624,7 @@ public class PackageParser {
         }
 
         try {
-            JarFile jarFile = new JarFile(mArchiveSourcePath);
+            StrictJarFile jarFile = new StrictJarFile(mArchiveSourcePath);
 
             Certificate[] certs = null;
 
@@ -633,7 +633,7 @@ public class PackageParser {
                 // can trust it...  we'll just use the AndroidManifest.xml
                 // to retrieve its signatures, not validating all of the
                 // files.
-                JarEntry jarEntry = jarFile.getJarEntry(ANDROID_MANIFEST_FILENAME);
+                ZipEntry jarEntry = jarFile.findEntry(ANDROID_MANIFEST_FILENAME);
                 certs = loadCertificates(jarFile, jarEntry, readBuffer);
                 if (certs == null) {
                     Slog.e(TAG, "Package " + pkg.packageName
@@ -656,9 +656,9 @@ public class PackageParser {
                     }
                 }
             } else {
-                Enumeration<JarEntry> entries = jarFile.entries();
-                while (entries.hasMoreElements()) {
-                    final JarEntry je = entries.nextElement();
+                Iterator<ZipEntry> entries = jarFile.iterator();
+                while (entries.hasNext()) {
+                    final ZipEntry je = entries.next();
                     if (je.isDirectory()) continue;
 
                     final String name = je.getName();
@@ -741,6 +741,10 @@ public class PackageParser {
             mParseError = PackageManager.INSTALL_PARSE_FAILED_CERTIFICATE_ENCODING;
             return false;
         } catch (IOException e) {
+            Slog.w(TAG, "Exception reading " + mArchiveSourcePath, e);
+            mParseError = PackageManager.INSTALL_PARSE_FAILED_CERTIFICATE_ENCODING;
+            return false;
+        } catch (SecurityException e) {
             Slog.w(TAG, "Exception reading " + mArchiveSourcePath, e);
             mParseError = PackageManager.INSTALL_PARSE_FAILED_CERTIFICATE_ENCODING;
             return false;
@@ -1654,7 +1658,8 @@ public class PackageParser {
                 com.android.internal.R.styleable.AndroidManifestPermissionGroup_name,
                 com.android.internal.R.styleable.AndroidManifestPermissionGroup_label,
                 com.android.internal.R.styleable.AndroidManifestPermissionGroup_icon,
-                com.android.internal.R.styleable.AndroidManifestPermissionGroup_logo)) {
+                com.android.internal.R.styleable.AndroidManifestPermissionGroup_logo,
+                com.android.internal.R.styleable.AndroidManifestPermissionGroup_banner)) {
             sa.recycle();
             mParseError = PackageManager.INSTALL_PARSE_FAILED_MANIFEST_MALFORMED;
             return null;
@@ -1697,7 +1702,8 @@ public class PackageParser {
                 com.android.internal.R.styleable.AndroidManifestPermission_name,
                 com.android.internal.R.styleable.AndroidManifestPermission_label,
                 com.android.internal.R.styleable.AndroidManifestPermission_icon,
-                com.android.internal.R.styleable.AndroidManifestPermission_logo)) {
+                com.android.internal.R.styleable.AndroidManifestPermission_logo,
+                com.android.internal.R.styleable.AndroidManifestPermission_banner)) {
             sa.recycle();
             mParseError = PackageManager.INSTALL_PARSE_FAILED_MANIFEST_MALFORMED;
             return null;
@@ -1766,7 +1772,8 @@ public class PackageParser {
                 com.android.internal.R.styleable.AndroidManifestPermissionTree_name,
                 com.android.internal.R.styleable.AndroidManifestPermissionTree_label,
                 com.android.internal.R.styleable.AndroidManifestPermissionTree_icon,
-                com.android.internal.R.styleable.AndroidManifestPermissionTree_logo)) {
+                com.android.internal.R.styleable.AndroidManifestPermissionTree_logo,
+                com.android.internal.R.styleable.AndroidManifestPermissionTree_banner)) {
             sa.recycle();
             mParseError = PackageManager.INSTALL_PARSE_FAILED_MANIFEST_MALFORMED;
             return null;
@@ -1811,7 +1818,8 @@ public class PackageParser {
                     com.android.internal.R.styleable.AndroidManifestInstrumentation_name,
                     com.android.internal.R.styleable.AndroidManifestInstrumentation_label,
                     com.android.internal.R.styleable.AndroidManifestInstrumentation_icon,
-                    com.android.internal.R.styleable.AndroidManifestInstrumentation_logo);
+                    com.android.internal.R.styleable.AndroidManifestInstrumentation_logo,
+                    com.android.internal.R.styleable.AndroidManifestInstrumentation_banner);
             mParseInstrumentationArgs.tag = "<instrumentation>";
         }
         
@@ -1927,6 +1935,8 @@ public class PackageParser {
                 com.android.internal.R.styleable.AndroidManifestApplication_icon, 0);
         ai.logo = sa.getResourceId(
                 com.android.internal.R.styleable.AndroidManifestApplication_logo, 0);
+        ai.banner = sa.getResourceId(
+                com.android.internal.R.styleable.AndroidManifestApplication_banner, 0);
         ai.theme = sa.getResourceId(
                 com.android.internal.R.styleable.AndroidManifestApplication_theme, 0);
         ai.descriptionRes = sa.getResourceId(
@@ -2048,6 +2058,11 @@ public class PackageParser {
             ai.enabled = sa.getBoolean(
                     com.android.internal.R.styleable.AndroidManifestApplication_enabled, true);
             
+            if (sa.getBoolean(
+                    com.android.internal.R.styleable.AndroidManifestApplication_isGame, false)) {
+                ai.flags |= ApplicationInfo.FLAG_IS_GAME;
+            }
+
             if (false) {
                 if (sa.getBoolean(
                         com.android.internal.R.styleable.AndroidManifestApplication_cantSaveState,
@@ -2220,7 +2235,7 @@ public class PackageParser {
 
     private boolean parsePackageItemInfo(Package owner, PackageItemInfo outInfo,
             String[] outError, String tag, TypedArray sa,
-            int nameRes, int labelRes, int iconRes, int logoRes) {
+            int nameRes, int labelRes, int iconRes, int logoRes, int bannerRes) {
         String name = sa.getNonConfigurationString(nameRes, 0);
         if (name == null) {
             outError[0] = tag + " does not specify android:name";
@@ -2242,6 +2257,11 @@ public class PackageParser {
         int logoVal = sa.getResourceId(logoRes, 0);
         if (logoVal != 0) {
             outInfo.logo = logoVal;
+        }
+
+        int bannerVal = sa.getResourceId(bannerRes, 0);
+        if (bannerVal != 0) {
+            outInfo.banner = bannerVal;
         }
 
         TypedValue v = sa.peekValue(labelRes);
@@ -2267,6 +2287,7 @@ public class PackageParser {
                     com.android.internal.R.styleable.AndroidManifestActivity_label,
                     com.android.internal.R.styleable.AndroidManifestActivity_icon,
                     com.android.internal.R.styleable.AndroidManifestActivity_logo,
+                    com.android.internal.R.styleable.AndroidManifestActivity_banner,
                     mSeparateProcesses,
                     com.android.internal.R.styleable.AndroidManifestActivity_process,
                     com.android.internal.R.styleable.AndroidManifestActivity_description,
@@ -2391,6 +2412,12 @@ public class PackageParser {
                 com.android.internal.R.styleable.AndroidManifestActivity_immersive,
                 false)) {
             a.info.flags |= ActivityInfo.FLAG_IMMERSIVE;
+        }
+
+        if (sa.getBoolean(
+                com.android.internal.R.styleable.AndroidManifestActivity_allowEmbedded,
+                false)) {
+            a.info.flags |= ActivityInfo.FLAG_ALLOW_EMBEDDED;
         }
 
         if (!receiver) {
@@ -2552,6 +2579,7 @@ public class PackageParser {
                     com.android.internal.R.styleable.AndroidManifestActivityAlias_label,
                     com.android.internal.R.styleable.AndroidManifestActivityAlias_icon,
                     com.android.internal.R.styleable.AndroidManifestActivityAlias_logo,
+                    com.android.internal.R.styleable.AndroidManifestActivityAlias_banner,
                     mSeparateProcesses,
                     0,
                     com.android.internal.R.styleable.AndroidManifestActivityAlias_description,
@@ -2586,6 +2614,7 @@ public class PackageParser {
         info.flags = target.info.flags;
         info.icon = target.info.icon;
         info.logo = target.info.logo;
+        info.banner = target.info.banner;
         info.labelRes = target.info.labelRes;
         info.nonLocalizedLabel = target.info.nonLocalizedLabel;
         info.launchMode = target.info.launchMode;
@@ -2699,6 +2728,7 @@ public class PackageParser {
                     com.android.internal.R.styleable.AndroidManifestProvider_label,
                     com.android.internal.R.styleable.AndroidManifestProvider_icon,
                     com.android.internal.R.styleable.AndroidManifestProvider_logo,
+                    com.android.internal.R.styleable.AndroidManifestProvider_banner,
                     mSeparateProcesses,
                     com.android.internal.R.styleable.AndroidManifestProvider_process,
                     com.android.internal.R.styleable.AndroidManifestProvider_description,
@@ -3005,6 +3035,7 @@ public class PackageParser {
                     com.android.internal.R.styleable.AndroidManifestService_label,
                     com.android.internal.R.styleable.AndroidManifestService_icon,
                     com.android.internal.R.styleable.AndroidManifestService_logo,
+                    com.android.internal.R.styleable.AndroidManifestService_banner,
                     mSeparateProcesses,
                     com.android.internal.R.styleable.AndroidManifestService_process,
                     com.android.internal.R.styleable.AndroidManifestService_description,
@@ -3301,6 +3332,9 @@ public class PackageParser {
         
         outInfo.logo = sa.getResourceId(
                 com.android.internal.R.styleable.AndroidManifestIntentFilter_logo, 0);
+
+        outInfo.banner = sa.getResourceId(
+                com.android.internal.R.styleable.AndroidManifestIntentFilter_banner, 0);
 
         sa.recycle();
 
@@ -3662,6 +3696,11 @@ public class PackageParser {
             int logoVal = args.sa.getResourceId(args.logoRes, 0);
             if (logoVal != 0) {
                 outInfo.logo = logoVal;
+            }
+
+            int bannerVal = args.sa.getResourceId(args.bannerRes, 0);
+            if (bannerVal != 0) {
+                outInfo.banner = bannerVal;
             }
 
             TypedValue v = args.sa.peekValue(args.labelRes);
@@ -4088,6 +4127,7 @@ public class PackageParser {
         public CharSequence nonLocalizedLabel;
         public int icon;
         public int logo;
+        public int banner;
         public int preferred;
     }
 

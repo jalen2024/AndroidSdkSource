@@ -16,10 +16,12 @@
 
 package com.android.internal.widget;
 
+import android.content.res.Configuration;
 import android.graphics.Canvas;
 import android.graphics.drawable.Drawable;
 import android.os.Build;
 import android.view.ViewGroup;
+import android.view.WindowInsets;
 import com.android.internal.app.ActionBarImpl;
 
 import android.content.Context;
@@ -96,7 +98,7 @@ public class ActionBarOverlayLayout extends ViewGroup {
             if (mLastSystemUiVisibility != 0) {
                 int newVis = mLastSystemUiVisibility;
                 onWindowSystemUiVisibilityChanged(newVis);
-                requestFitSystemWindows();
+                requestApplyInsets();
             }
         }
     }
@@ -134,6 +136,13 @@ public class ActionBarOverlayLayout extends ViewGroup {
     }
 
     @Override
+    protected void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        init(getContext());
+        requestApplyInsets();
+    }
+
+    @Override
     public void onWindowSystemUiVisibilityChanged(int visible) {
         super.onWindowSystemUiVisibilityChanged(visible);
         pullChildren();
@@ -152,7 +161,7 @@ public class ActionBarOverlayLayout extends ViewGroup {
         }
         if ((diff&SYSTEM_UI_FLAG_LAYOUT_STABLE) != 0) {
             if (mActionBar != null) {
-                requestFitSystemWindows();
+                requestApplyInsets();
             }
         }
     }
@@ -190,19 +199,20 @@ public class ActionBarOverlayLayout extends ViewGroup {
     }
 
     @Override
-    protected boolean fitSystemWindows(Rect insets) {
+    public WindowInsets onApplyWindowInsets(WindowInsets insets) {
         pullChildren();
 
         final int vis = getWindowSystemUiVisibility();
         final boolean stable = (vis & SYSTEM_UI_FLAG_LAYOUT_STABLE) != 0;
+        final Rect systemInsets = insets.getSystemWindowInsets();
 
         // The top and bottom action bars are always within the content area.
-        boolean changed = applyInsets(mActionBarTop, insets, true, true, false, true);
+        boolean changed = applyInsets(mActionBarTop, systemInsets, true, true, false, true);
         if (mActionBarBottom != null) {
-            changed |= applyInsets(mActionBarBottom, insets, true, false, true, true);
+            changed |= applyInsets(mActionBarBottom, systemInsets, true, false, true, true);
         }
 
-        mBaseInnerInsets.set(insets);
+        mBaseInnerInsets.set(systemInsets);
         computeFitSystemWindows(mBaseInnerInsets, mBaseContentInsets);
         if (!mLastBaseContentInsets.equals(mBaseContentInsets)) {
             changed = true;
@@ -215,9 +225,9 @@ public class ActionBarOverlayLayout extends ViewGroup {
 
         // We don't do any more at this point.  To correctly compute the content/inner
         // insets in all cases, we need to know the measured size of the various action
-        // bar elements.  fitSystemWindows() happens before the measure pass, so we can't
+        // bar elements.  onApplyWindowInsets() happens before the measure pass, so we can't
         // do that here.  Instead we will take this up in onMeasure().
-        return true;
+        return WindowInsets.CONSUMED;
     }
 
     @Override
@@ -321,7 +331,7 @@ public class ActionBarOverlayLayout extends ViewGroup {
             // the app's fitSystemWindows().  We do this before measuring the content
             // view to keep the same semantics as the normal fitSystemWindows() call.
             mLastInnerInsets.set(mInnerInsets);
-            super.fitSystemWindows(mInnerInsets);
+            mContent.dispatchApplyWindowInsets(new WindowInsets(mInnerInsets));
         }
 
         measureChildWithMargins(mContent, widthMeasureSpec, 0, heightMeasureSpec, 0);

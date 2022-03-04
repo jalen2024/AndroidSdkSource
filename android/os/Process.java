@@ -377,7 +377,7 @@ public class Process {
      * @param gids Additional group-ids associated with the process.
      * @param debugFlags Additional flags.
      * @param targetSdkVersion The target SDK version for the app.
-     * @param seInfo null-ok SE Android information for the new process.
+     * @param seInfo null-ok SELinux information for the new process.
      * @param zygoteArgs Additional arguments to supply to the zygote process.
      * 
      * @return An object that describes the result of the attempt to start the process.
@@ -557,7 +557,7 @@ public class Process {
      * new process should setgroup() to.
      * @param debugFlags Additional flags.
      * @param targetSdkVersion The target SDK version for the app.
-     * @param seInfo null-ok SE Android information for the new process.
+     * @param seInfo null-ok SELinux information for the new process.
      * @param extraArgs Additional arguments to supply to the zygote process.
      * @return An object that describes the result of the attempt to start the process.
      * @throws ZygoteStartFailedEx if process start failed for any reason
@@ -890,19 +890,6 @@ public class Process {
     public static final boolean supportsProcesses() {
         return true;
     }
-
-    /**
-     * Set the out-of-memory badness adjustment for a process.
-     * 
-     * @param pid The process identifier to set.
-     * @param amt Adjustment value -- linux allows -16 to +15.
-     * 
-     * @return Returns true if the underlying system supports this
-     *         feature, else false.
-     *         
-     * {@hide}
-     */
-    public static final native boolean setOomAdj(int pid, int amt);
 
     /**
      * Adjust the swappiness level for a process.

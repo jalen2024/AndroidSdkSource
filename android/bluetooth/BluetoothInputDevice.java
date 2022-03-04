@@ -76,6 +76,19 @@ public final class BluetoothInputDevice implements BluetoothProfile {
     public static final String ACTION_PROTOCOL_MODE_CHANGED =
         "android.bluetooth.input.profile.action.PROTOCOL_MODE_CHANGED";
 
+    /**
+     * @hide
+     */
+    @SdkConstant(SdkConstantType.BROADCAST_INTENT_ACTION)
+    public static final String ACTION_HANDSHAKE =
+        "android.bluetooth.input.profile.action.HANDSHAKE";
+
+    /**
+     * @hide
+     */
+    @SdkConstant(SdkConstantType.BROADCAST_INTENT_ACTION)
+    public static final String ACTION_REPORT =
+        "android.bluetooth.input.profile.action.REPORT";
 
     /**
      * @hide
@@ -130,17 +143,17 @@ public final class BluetoothInputDevice implements BluetoothProfile {
     /**
      * @hide
      */
-    public static final byte REPORT_TYPE_INPUT = 0;
+    public static final byte REPORT_TYPE_INPUT = 1;
 
     /**
      * @hide
      */
-    public static final byte REPORT_TYPE_OUTPUT = 1;
+    public static final byte REPORT_TYPE_OUTPUT = 2;
 
     /**
      * @hide
      */
-    public static final byte REPORT_TYPE_FEATURE = 2;
+    public static final byte REPORT_TYPE_FEATURE = 3;
 
     /**
      * @hide
@@ -176,6 +189,11 @@ public final class BluetoothInputDevice implements BluetoothProfile {
      * @hide
      */
     public static final String EXTRA_REPORT = "android.bluetooth.BluetoothInputDevice.extra.REPORT";
+
+    /**
+     * @hide
+     */
+    public static final String EXTRA_STATUS = "android.bluetooth.BluetoothInputDevice.extra.STATUS";
 
     /**
      * @hide
@@ -603,7 +621,7 @@ public final class BluetoothInputDevice implements BluetoothProfile {
      * @hide
      */
     public boolean setReport(BluetoothDevice device, byte reportType, String report) {
-        if (DBG) log("setReport(" + device + "), reportType=" + reportType + " report=" + report);
+        if (VDBG) log("setReport(" + device + "), reportType=" + reportType + " report=" + report);
         if (mService != null && isEnabled() && isValidDevice(device)) {
             try {
                 return mService.setReport(device, reportType, report);

@@ -38,7 +38,7 @@ import android.widget.TextView;
 import com.android.datetimepicker.HapticFeedbackController;
 import com.android.datetimepicker.R;
 import com.android.datetimepicker.Utils;
-import com.android.datetimepicker.date.SimpleMonthAdapter.CalendarDay;
+import com.android.datetimepicker.date.MonthAdapter.CalendarDay;
 
 import java.text.SimpleDateFormat;
 import java.util.Calendar;
@@ -97,6 +97,8 @@ public class DatePickerDialog extends DialogFragment implements
     private int mWeekStart = mCalendar.getFirstDayOfWeek();
     private int mMinYear = DEFAULT_START_YEAR;
     private int mMaxYear = DEFAULT_END_YEAR;
+    private Calendar mMinDate;
+    private Calendar mMaxDate;
 
     private HapticFeedbackController mHapticFeedbackController;
 
@@ -219,7 +221,7 @@ public class DatePickerDialog extends DialogFragment implements
         }
 
         final Activity activity = getActivity();
-        mDayPickerView = new DayPickerView(activity, this);
+        mDayPickerView = new SimpleDayPickerView(activity, this);
         mYearPickerView = new YearPickerView(activity, this);
 
         Resources res = getResources();
@@ -374,6 +376,48 @@ public class DatePickerDialog extends DialogFragment implements
         if (mDayPickerView != null) {
             mDayPickerView.onChange();
         }
+    }
+
+    /**
+     * Sets the minimal date supported by this DatePicker. Dates before (but not including) the
+     * specified date will be disallowed from being selected.
+     * @param calendar a Calendar object set to the year, month, day desired as the mindate.
+     */
+    public void setMinDate(Calendar calendar) {
+        mMinDate = calendar;
+
+        if (mDayPickerView != null) {
+            mDayPickerView.onChange();
+        }
+    }
+
+    /**
+     * @return The minimal date supported by this DatePicker. Null if it has not been set.
+     */
+    @Override
+    public Calendar getMinDate() {
+        return mMinDate;
+    }
+
+    /**
+     * Sets the minimal date supported by this DatePicker. Dates after (but not including) the
+     * specified date will be disallowed from being selected.
+     * @param calendar a Calendar object set to the year, month, day desired as the maxdate.
+     */
+    public void setMaxDate(Calendar calendar) {
+        mMaxDate = calendar;
+
+        if (mDayPickerView != null) {
+            mDayPickerView.onChange();
+        }
+    }
+
+    /**
+     * @return The maximal date supported by this DatePicker. Null if it has not been set.
+     */
+    @Override
+    public Calendar getMaxDate() {
+        return mMaxDate;
     }
 
     public void setOnDateSetListener(OnDateSetListener listener) {

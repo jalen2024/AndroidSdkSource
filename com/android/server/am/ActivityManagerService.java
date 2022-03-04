@@ -24,15 +24,19 @@ import static com.android.internal.util.XmlUtils.writeLongAttribute;
 import static com.android.server.Watchdog.NATIVE_STACKS_OF_INTEREST;
 import static org.xmlpull.v1.XmlPullParser.END_DOCUMENT;
 import static org.xmlpull.v1.XmlPullParser.START_TAG;
-
 import static com.android.server.am.ActivityStackSupervisor.HOME_STACK_ID;
 
 import android.app.AppOpsManager;
+import android.app.IActivityContainer;
+import android.app.IActivityContainerCallback;
 import android.appwidget.AppWidgetManager;
+import android.graphics.Rect;
 import android.util.ArrayMap;
+
 import com.android.internal.R;
 import com.android.internal.annotations.GuardedBy;
 import com.android.internal.app.IAppOpsService;
+import com.android.internal.app.ProcessMap;
 import com.android.internal.app.ProcessStats;
 import com.android.internal.os.BackgroundThread;
 import com.android.internal.os.BatteryStatsImpl;
@@ -45,20 +49,19 @@ import com.android.internal.util.Preconditions;
 import com.android.server.AppOpsService;
 import com.android.server.AttributeCache;
 import com.android.server.IntentResolver;
-import com.android.internal.app.ProcessMap;
-import com.android.server.SystemServer;
+import com.android.server.LocalServices;
+import com.android.server.ServiceThread;
+import com.android.server.SystemService;
 import com.android.server.Watchdog;
 import com.android.server.am.ActivityStack.ActivityState;
 import com.android.server.firewall.IntentFirewall;
 import com.android.server.pm.UserManagerService;
 import com.android.server.wm.AppTransition;
-import com.android.server.wm.StackBox;
 import com.android.server.wm.WindowManagerService;
 import com.google.android.collect.Lists;
 import com.google.android.collect.Maps;
 
 import dalvik.system.Zygote;
-
 import libcore.io.IoUtils;
 
 import org.xmlpull.v1.XmlPullParser;
@@ -68,8 +71,8 @@ import org.xmlpull.v1.XmlSerializer;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.ActivityManager.RunningTaskInfo;
-import android.app.ActivityManager.StackBoxInfo;
 import android.app.ActivityManager.StackInfo;
+import android.app.ActivityManagerInternal;
 import android.app.ActivityManagerNative;
 import android.app.ActivityOptions;
 import android.app.ActivityThread;
@@ -134,6 +137,7 @@ import android.os.Bundle;
 import android.os.Debug;
 import android.os.DropBoxManager;
 import android.os.Environment;
+import android.os.FactoryTest;
 import android.os.FileObserver;
 import android.os.FileUtils;
 import android.os.Handler;
@@ -330,8 +334,6 @@ public final class ActivityManagerService extends ActivityManagerNative
     ActivityStackSupervisor mStackSupervisor;
 
     public IntentFirewall mIntentFirewall;
-
-    private final boolean mHeadless;
 
     // Whether we should show our dialogs (ANR, crash, etc) or just perform their
     // default actuion automatically.  Important for devices without direct input
@@ -747,7 +749,7 @@ public final class ActivityManagerService extends ActivityManagerNative
         }
     }
 
-    private static ThreadLocal<Identity> sCallerIdentity = new ThreadLocal<Identity>();
+    private static final ThreadLocal<Identity> sCallerIdentity = new ThreadLocal<Identity>();
 
     /**
      * All information we have collected about the runtime performance of
@@ -797,9 +799,8 @@ public final class ActivityManagerService extends ActivityManagerNative
     /**
      * Used to control how we initialize the service.
      */
-    boolean mStartRunning = false;
     ComponentName mTopComponent;
-    String mTopAction;
+    String mTopAction = Intent.ACTION_MAIN;
     String mTopData;
     boolean mProcessesReady = false;
     boolean mSystemReady = false;
@@ -996,8 +997,7 @@ public final class ActivityManagerService extends ActivityManagerNative
 
     WindowManagerService mWindowManager;
 
-    static ActivityManagerService mSelf;
-    static ActivityThread mSystemThread;
+    final ActivityThread mSystemThread;
 
     int mCurrentUserId = 0;
     private UserManagerService mUserManager;
@@ -1074,10 +1074,13 @@ public final class ActivityManagerService extends ActivityManagerNative
      */
     private boolean mUserIsMonkey;
 
-    final Handler mHandler = new Handler() {
-        //public Handler() {
-        //    if (localLOGV) Slog.v(TAG, "Handler started!");
-        //}
+    final ServiceThread mHandlerThread;
+    final MainHandler mHandler;
+
+    final class MainHandler extends Handler {
+        public MainHandler(Looper looper) {
+            super(looper, null, true);
+        }
 
         @Override
         public void handleMessage(Message msg) {
@@ -1730,38 +1733,34 @@ public final class ActivityManagerService extends ActivityManagerNative
         }
     };
 
-    public static void setSystemProcess() {
+    public void setSystemProcess() {
         try {
-            ActivityManagerService m = mSelf;
-
-            ServiceManager.addService(Context.ACTIVITY_SERVICE, m, true);
-            ServiceManager.addService(ProcessStats.SERVICE_NAME, m.mProcessStats);
-            ServiceManager.addService("meminfo", new MemBinder(m));
-            ServiceManager.addService("gfxinfo", new GraphicsBinder(m));
-            ServiceManager.addService("dbinfo", new DbBinder(m));
+            ServiceManager.addService(Context.ACTIVITY_SERVICE, this, true);
+            ServiceManager.addService(ProcessStats.SERVICE_NAME, mProcessStats);
+            ServiceManager.addService("meminfo", new MemBinder(this));
+            ServiceManager.addService("gfxinfo", new GraphicsBinder(this));
+            ServiceManager.addService("dbinfo", new DbBinder(this));
             if (MONITOR_CPU_USAGE) {
-                ServiceManager.addService("cpuinfo", new CpuBinder(m));
+                ServiceManager.addService("cpuinfo", new CpuBinder(this));
             }
-            ServiceManager.addService("permission", new PermissionController(m));
+            ServiceManager.addService("permission", new PermissionController(this));
 
-            ApplicationInfo info =
-                mSelf.mContext.getPackageManager().getApplicationInfo(
-                            "android", STOCK_PM_FLAGS);
+            ApplicationInfo info = mContext.getPackageManager().getApplicationInfo(
+                    "android", STOCK_PM_FLAGS);
             mSystemThread.installSystemApplicationInfo(info);
 
-            synchronized (mSelf) {
-                ProcessRecord app = mSelf.newProcessRecordLocked(info,
-                        info.processName, false);
+            synchronized (this) {
+                ProcessRecord app = newProcessRecordLocked(info, info.processName, false);
                 app.persistent = true;
                 app.pid = MY_PID;
                 app.maxAdj = ProcessList.SYSTEM_ADJ;
-                app.makeActive(mSystemThread.getApplicationThread(), mSelf.mProcessStats);
-                mSelf.mProcessNames.put(app.processName, app.uid, app);
-                synchronized (mSelf.mPidsSelfLocked) {
-                    mSelf.mPidsSelfLocked.put(app.pid, app);
+                app.makeActive(mSystemThread.getApplicationThread(), mProcessStats);
+                mProcessNames.put(app.processName, app.uid, app);
+                synchronized (mPidsSelfLocked) {
+                    mPidsSelfLocked.put(app.pid, app);
                 }
-                mSelf.updateLruProcessLocked(app, false, null);
-                mSelf.updateOomAdjLocked();
+                updateLruProcessLocked(app, false, null);
+                updateOomAdjLocked();
             }
         } catch (PackageManager.NameNotFoundException e) {
             throw new RuntimeException(
@@ -1772,103 +1771,15 @@ public final class ActivityManagerService extends ActivityManagerNative
     public void setWindowManager(WindowManagerService wm) {
         mWindowManager = wm;
         mStackSupervisor.setWindowManager(wm);
-        wm.createStack(HOME_STACK_ID, -1, StackBox.TASK_STACK_GOES_OVER, 1.0f);
     }
 
     public void startObservingNativeCrashes() {
-        final NativeCrashListener ncl = new NativeCrashListener();
+        final NativeCrashListener ncl = new NativeCrashListener(this);
         ncl.start();
-    }
-
-    public static final Context main(int factoryTest) {
-        AThread thr = new AThread();
-        thr.start();
-
-        synchronized (thr) {
-            while (thr.mService == null) {
-                try {
-                    thr.wait();
-                } catch (InterruptedException e) {
-                }
-            }
-        }
-
-        ActivityManagerService m = thr.mService;
-        mSelf = m;
-        ActivityThread at = ActivityThread.systemMain();
-        mSystemThread = at;
-        Context context = at.getSystemContext();
-        context.setTheme(android.R.style.Theme_Holo);
-        m.mContext = context;
-        m.mFactoryTest = factoryTest;
-        m.mIntentFirewall = new IntentFirewall(m.new IntentFirewallInterface());
-
-        m.mStackSupervisor = new ActivityStackSupervisor(m, context, thr.mLooper);
-
-        m.mBatteryStatsService.publish(context);
-        m.mUsageStatsService.publish(context);
-        m.mAppOpsService.publish(context);
-
-        synchronized (thr) {
-            thr.mReady = true;
-            thr.notifyAll();
-        }
-
-        m.startRunning(null, null, null, null);
-
-        return context;
-    }
-
-    public static ActivityManagerService self() {
-        return mSelf;
     }
 
     public IAppOpsService getAppOpsService() {
         return mAppOpsService;
-    }
-
-    static class AThread extends Thread {
-        ActivityManagerService mService;
-        Looper mLooper;
-        boolean mReady = false;
-
-        public AThread() {
-            super("ActivityManager");
-        }
-
-        @Override
-        public void run() {
-            Looper.prepare();
-
-            android.os.Process.setThreadPriority(
-                    android.os.Process.THREAD_PRIORITY_FOREGROUND);
-            android.os.Process.setCanSelfBackground(false);
-
-            ActivityManagerService m = new ActivityManagerService();
-
-            synchronized (this) {
-                mService = m;
-                mLooper = Looper.myLooper();
-                Watchdog.getInstance().addThread(new Handler(mLooper), getName());
-                notifyAll();
-            }
-
-            synchronized (this) {
-                while (!mReady) {
-                    try {
-                        wait();
-                    } catch (InterruptedException e) {
-                    }
-                }
-            }
-
-            // For debug builds, log event loop stalls to dropbox for analysis.
-            if (StrictMode.conditionallyEnableDebugLogging()) {
-                Slog.i(TAG, "Enabled StrictMode logging for AThread's Looper");
-            }
-
-            Looper.loop();
-        }
     }
 
     static class MemBinder extends Binder {
@@ -1955,22 +1866,54 @@ public final class ActivityManagerService extends ActivityManagerNative
         }
     }
 
-    private ActivityManagerService() {
+    public static final class Lifecycle extends SystemService {
+        private final ActivityManagerService mService;
+
+        public Lifecycle(Context context) {
+            super(context);
+            mService = new ActivityManagerService(context);
+        }
+
+        @Override
+        public void onStart() {
+            mService.start();
+        }
+
+        public ActivityManagerService getService() {
+            return mService;
+        }
+    }
+
+    // Note: This method is invoked on the main thread but may need to attach various
+    // handlers to other threads.  So take care to be explicit about the looper.
+    public ActivityManagerService(Context systemContext) {
+        mContext = systemContext;
+        mFactoryTest = FactoryTest.getMode();
+        mSystemThread = ActivityThread.currentActivityThread();
+
         Slog.i(TAG, "Memory class: " + ActivityManager.staticGetMemoryClass());
 
-        mFgBroadcastQueue = new BroadcastQueue(this, "foreground", BROADCAST_FG_TIMEOUT, false);
-        mBgBroadcastQueue = new BroadcastQueue(this, "background", BROADCAST_BG_TIMEOUT, true);
+        mHandlerThread = new ServiceThread(TAG,
+                android.os.Process.THREAD_PRIORITY_FOREGROUND, false /*allowIo*/);
+        mHandlerThread.start();
+        mHandler = new MainHandler(mHandlerThread.getLooper());
+
+        mFgBroadcastQueue = new BroadcastQueue(this, mHandler,
+                "foreground", BROADCAST_FG_TIMEOUT, false);
+        mBgBroadcastQueue = new BroadcastQueue(this, mHandler,
+                "background", BROADCAST_BG_TIMEOUT, true);
         mBroadcastQueues[0] = mFgBroadcastQueue;
         mBroadcastQueues[1] = mBgBroadcastQueue;
 
         mServices = new ActiveServices(this);
         mProviderMap = new ProviderMap(this);
 
+        // TODO: Move creation of battery stats service outside of activity manager service.
         File dataDir = Environment.getDataDirectory();
         File systemDir = new File(dataDir, "system");
         systemDir.mkdirs();
         mBatteryStatsService = new BatteryStatsService(new File(
-                systemDir, "batterystats.bin").toString());
+                systemDir, "batterystats.bin").toString(), mHandler);
         mBatteryStatsService.getActiveStatistics().readLocked();
         mBatteryStatsService.getActiveStatistics().writeAsyncLocked();
         mOnBattery = DEBUG_POWER ? true
@@ -1980,11 +1923,9 @@ public final class ActivityManagerService extends ActivityManagerNative
         mProcessStats = new ProcessStatsService(this, new File(systemDir, "procstats"));
 
         mUsageStatsService = new UsageStatsService(new File(systemDir, "usagestats").toString());
-        mAppOpsService = new AppOpsService(new File(systemDir, "appops.xml"));
+        mAppOpsService = new AppOpsService(new File(systemDir, "appops.xml"), mHandler);
 
         mGrantFile = new AtomicFile(new File(systemDir, "urigrants.xml"));
-
-        mHeadless = "1".equals(SystemProperties.get("ro.config.headless", "0"));
 
         // User 0 is the first and only user that runs at boot.
         mStartedUsers.put(0, new UserStartedState(new UserHandle(0), true));
@@ -2000,10 +1941,9 @@ public final class ActivityManagerService extends ActivityManagerNative
         mConfigurationSeq = mConfiguration.seq = 1;
         mProcessCpuTracker.init();
 
-        mCompatModePackages = new CompatModePackages(this, systemDir);
-
-        // Add ourself to the Watchdog monitors.
-        Watchdog.getInstance().addMonitor(this);
+        mCompatModePackages = new CompatModePackages(this, systemDir, mHandler);
+        mIntentFirewall = new IntentFirewall(new IntentFirewallInterface(), mHandler);
+        mStackSupervisor = new ActivityStackSupervisor(this);
 
         mProcessCpuThread = new Thread("CpuTracker") {
             @Override
@@ -2034,7 +1974,19 @@ public final class ActivityManagerService extends ActivityManagerNative
                 }
             }
         };
+
+        Watchdog.getInstance().addMonitor(this);
+        Watchdog.getInstance().addThread(mHandler);
+    }
+
+    private void start() {
         mProcessCpuThread.start();
+
+        mBatteryStatsService.publish(mContext);
+        mUsageStatsService.publish(mContext);
+        mAppOpsService.publish(mContext);
+
+        LocalServices.addService(ActivityManagerInternal.class, new LocalService());
     }
 
     @Override
@@ -2730,13 +2682,13 @@ public final class ActivityManagerService extends ActivityManagerNative
                 }
                 gids[0] = UserHandle.getSharedAppGid(UserHandle.getAppId(uid));
             }
-            if (mFactoryTest != SystemServer.FACTORY_TEST_OFF) {
-                if (mFactoryTest == SystemServer.FACTORY_TEST_LOW_LEVEL
+            if (mFactoryTest != FactoryTest.FACTORY_TEST_OFF) {
+                if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL
                         && mTopComponent != null
                         && app.processName.equals(mTopComponent.getPackageName())) {
                     uid = 0;
                 }
-                if (mFactoryTest == SystemServer.FACTORY_TEST_HIGH_LEVEL
+                if (mFactoryTest == FactoryTest.FACTORY_TEST_HIGH_LEVEL
                         && (app.info.flags&ApplicationInfo.FLAG_FACTORY_TEST) != 0) {
                     uid = 0;
                 }
@@ -2846,21 +2798,14 @@ public final class ActivityManagerService extends ActivityManagerNative
     Intent getHomeIntent() {
         Intent intent = new Intent(mTopAction, mTopData != null ? Uri.parse(mTopData) : null);
         intent.setComponent(mTopComponent);
-        if (mFactoryTest != SystemServer.FACTORY_TEST_LOW_LEVEL) {
+        if (mFactoryTest != FactoryTest.FACTORY_TEST_LOW_LEVEL) {
             intent.addCategory(Intent.CATEGORY_HOME);
         }
         return intent;
     }
 
     boolean startHomeActivityLocked(int userId) {
-        if (mHeadless) {
-            // Added because none of the other calls to ensureBootCompleted seem to fire
-            // when running headless.
-            ensureBootCompleted();
-            return false;
-        }
-
-        if (mFactoryTest == SystemServer.FACTORY_TEST_LOW_LEVEL
+        if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL
                 && mTopAction == null) {
             // We are running in factory test mode, but unable to find
             // the factory test app, so just sit around displaying the
@@ -2924,14 +2869,14 @@ public final class ActivityManagerService extends ActivityManagerNative
         // version than the last one shown, and we are not running in
         // low-level factory test mode.
         final ContentResolver resolver = mContext.getContentResolver();
-        if (mFactoryTest != SystemServer.FACTORY_TEST_LOW_LEVEL &&
+        if (mFactoryTest != FactoryTest.FACTORY_TEST_LOW_LEVEL &&
                 Settings.Global.getInt(resolver,
                         Settings.Global.DEVICE_PROVISIONED, 0) != 0) {
             mCheckedForSetup = true;
 
             // See if we should be showing the platform update setup UI.
             Intent intent = new Intent(Intent.ACTION_UPGRADE_SETUP);
-            List<ResolveInfo> ris = mSelf.mContext.getPackageManager()
+            List<ResolveInfo> ris = mContext.getPackageManager()
                     .queryIntentActivities(intent, PackageManager.GET_META_DATA);
 
             // We don't allow third party apps to replace this.
@@ -2959,7 +2904,7 @@ public final class ActivityManagerService extends ActivityManagerNative
                     intent.setComponent(new ComponentName(
                             ri.activityInfo.packageName, ri.activityInfo.name));
                     mStackSupervisor.startActivityLocked(null, intent, null, ri.activityInfo,
-                            null, null, 0, 0, 0, null, 0, null, false, null);
+                            null, null, 0, 0, 0, null, 0, null, false, null, null);
                 }
             }
         }
@@ -3117,7 +3062,7 @@ public final class ActivityManagerService extends ActivityManagerNative
         // TODO: Switch to user app stacks here.
         return mStackSupervisor.startActivityMayWait(caller, -1, callingPackage, intent, resolvedType,
                 resultTo, resultWho, requestCode, startFlags, profileFile, profileFd,
-                null, null, options, userId);
+                null, null, options, userId, null);
     }
 
     @Override
@@ -3132,7 +3077,7 @@ public final class ActivityManagerService extends ActivityManagerNative
         // TODO: Switch to user app stacks here.
         mStackSupervisor.startActivityMayWait(caller, -1, callingPackage, intent, resolvedType,
                 resultTo, resultWho, requestCode, startFlags, profileFile, profileFd,
-                res, null, options, UserHandle.getCallingUserId());
+                res, null, options, UserHandle.getCallingUserId(), null);
         return res;
     }
 
@@ -3147,7 +3092,7 @@ public final class ActivityManagerService extends ActivityManagerNative
         // TODO: Switch to user app stacks here.
         int ret = mStackSupervisor.startActivityMayWait(caller, -1, callingPackage, intent,
                 resolvedType, resultTo, resultWho, requestCode, startFlags,
-                null, null, null, config, options, userId);
+                null, null, null, config, options, userId, null);
         return ret;
     }
 
@@ -3179,7 +3124,7 @@ public final class ActivityManagerService extends ActivityManagerNative
             }
         }
         int ret = pir.sendInner(0, fillInIntent, resolvedType, null, null,
-                resultTo, resultWho, requestCode, flagsMask, flagsValues, options);
+                resultTo, resultWho, requestCode, flagsMask, flagsValues, options, null);
         return ret;
     }
 
@@ -3278,7 +3223,7 @@ public final class ActivityManagerService extends ActivityManagerNative
             int res = mStackSupervisor.startActivityLocked(r.app.thread, intent,
                     r.resolvedType, aInfo, resultTo != null ? resultTo.appToken : null,
                     resultWho, requestCode, -1, r.launchedFromUid, r.launchedFromPackage, 0,
-                    options, false, null);
+                    options, false, null, null);
             Binder.restoreCallingIdentity(origId);
 
             r.finishing = wasFinishing;
@@ -3291,7 +3236,8 @@ public final class ActivityManagerService extends ActivityManagerNative
 
     final int startActivityInPackage(int uid, String callingPackage,
             Intent intent, String resolvedType, IBinder resultTo,
-            String resultWho, int requestCode, int startFlags, Bundle options, int userId) {
+            String resultWho, int requestCode, int startFlags, Bundle options, int userId,
+                    IActivityContainer container) {
 
         userId = handleIncomingUser(Binder.getCallingPid(), Binder.getCallingUid(), userId,
                 false, true, "startActivityInPackage", null);
@@ -3299,7 +3245,7 @@ public final class ActivityManagerService extends ActivityManagerNative
         // TODO: Switch to user app stacks here.
         int ret = mStackSupervisor.startActivityMayWait(null, uid, callingPackage, intent, resolvedType,
                 resultTo, resultWho, requestCode, startFlags,
-                null, null, null, null, options, userId);
+                null, null, null, null, options, userId, container);
         return ret;
     }
 
@@ -3603,9 +3549,13 @@ public final class ActivityManagerService extends ActivityManagerNative
      */
     private final void handleAppDiedLocked(ProcessRecord app,
             boolean restarting, boolean allowRestart) {
+        int pid = app.pid;
         cleanUpApplicationRecordLocked(app, restarting, allowRestart, -1);
         if (!restarting) {
             removeLruProcessLocked(app);
+            if (pid > 0) {
+                ProcessList.remove(pid);
+            }
         }
 
         if (mProfileProc == app) {
@@ -4175,9 +4125,9 @@ public final class ActivityManagerService extends ActivityManagerNative
                         == PackageManager.PERMISSION_GRANTED) {
                     forceStopPackageLocked(packageName, pkgUid, "clear data");
                 } else {
-                    throw new SecurityException(pid+" does not have permission:"+
-                            android.Manifest.permission.CLEAR_APP_USER_DATA+" to clear data" +
-                                    "for process:"+packageName);
+                    throw new SecurityException("PID " + pid + " does not have permission "
+                            + android.Manifest.permission.CLEAR_APP_USER_DATA + " to clear data"
+                                    + " of package " + packageName);
                 }
             }
 
@@ -5000,7 +4950,7 @@ public final class ActivityManagerService extends ActivityManagerNative
         // See if the top visible activity is waiting to run in this process...
         if (normalMode) {
             try {
-                if (mStackSupervisor.attachApplicationLocked(app, mHeadless)) {
+                if (mStackSupervisor.attachApplicationLocked(app)) {
                     didSomething = true;
                 }
             } catch (Exception e) {
@@ -5157,7 +5107,7 @@ public final class ActivityManagerService extends ActivityManagerNative
                 }
             }
             
-            if (mFactoryTest != SystemServer.FACTORY_TEST_LOW_LEVEL) {
+            if (mFactoryTest != FactoryTest.FACTORY_TEST_LOW_LEVEL) {
                 // Start looking for apps that are abusing wake locks.
                 Message nmsg = mHandler.obtainMessage(CHECK_EXCESSIVE_WAKE_LOCKS_MSG);
                 mHandler.sendMessageDelayed(nmsg, POWER_CHECK_DELAY);
@@ -7107,23 +7057,52 @@ public final class ActivityManagerService extends ActivityManagerNative
     }
 
     @Override
-    public int createStack(int taskId, int relativeStackBoxId, int position, float weight) {
+    public IBinder getHomeActivityToken() throws RemoteException {
         enforceCallingPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS,
-                "createStack()");
-        if (DEBUG_STACK) Slog.d(TAG, "createStack: taskId=" + taskId + " relStackBoxId=" +
-                relativeStackBoxId + " position=" + position + " weight=" + weight);
+                "getHomeActivityToken()");
         synchronized (this) {
-            long ident = Binder.clearCallingIdentity();
-            try {
-                int stackId = mStackSupervisor.createStack();
-                mWindowManager.createStack(stackId, relativeStackBoxId, position, weight);
-                if (taskId > 0) {
-                    moveTaskToStack(taskId, stackId, true);
-                }
-                return stackId;
-            } finally {
-                Binder.restoreCallingIdentity(ident);
+            return mStackSupervisor.getHomeActivityToken();
+        }
+    }
+
+    @Override
+    public IActivityContainer createActivityContainer(IBinder parentActivityToken,
+            IActivityContainerCallback callback) throws RemoteException {
+        enforceCallingPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS,
+                "createActivityContainer()");
+        synchronized (this) {
+            if (parentActivityToken == null) {
+                throw new IllegalArgumentException("parent token must not be null");
             }
+            ActivityRecord r = ActivityRecord.forToken(parentActivityToken);
+            if (r == null) {
+                return null;
+            }
+            if (callback == null) {
+                throw new IllegalArgumentException("callback must not be null");
+            }
+            return mStackSupervisor.createActivityContainer(r, callback);
+        }
+    }
+
+    @Override
+    public void deleteActivityContainer(IActivityContainer container) throws RemoteException {
+        enforceCallingPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS,
+                "deleteActivityContainer()");
+        synchronized (this) {
+            mStackSupervisor.deleteActivityContainer(container);
+        }
+    }
+
+    @Override
+    public IActivityContainer getEnclosingActivityContainer(IBinder activityToken)
+            throws RemoteException {
+        synchronized (this) {
+            ActivityStack stack = ActivityRecord.getStackLocked(activityToken);
+            if (stack != null) {
+                return stack.mActivityContainer;
+            }
+            return null;
         }
     }
 
@@ -7148,99 +7127,40 @@ public final class ActivityManagerService extends ActivityManagerNative
     }
 
     @Override
-    public void resizeStackBox(int stackBoxId, float weight) {
+    public void resizeStack(int stackBoxId, Rect bounds) {
         enforceCallingPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS,
                 "resizeStackBox()");
         long ident = Binder.clearCallingIdentity();
         try {
-            mWindowManager.resizeStackBox(stackBoxId, weight);
-        } finally {
-            Binder.restoreCallingIdentity(ident);
-        }
-    }
-
-    private ArrayList<StackInfo> getStacks() {
-        synchronized (this) {
-            ArrayList<ActivityManager.StackInfo> list = new ArrayList<ActivityManager.StackInfo>();
-            ArrayList<ActivityStack> stacks = mStackSupervisor.getStacks();
-            for (ActivityStack stack : stacks) {
-                ActivityManager.StackInfo stackInfo = new ActivityManager.StackInfo();
-                int stackId = stack.mStackId;
-                stackInfo.stackId = stackId;
-                stackInfo.bounds = mWindowManager.getStackBounds(stackId);
-                ArrayList<TaskRecord> tasks = stack.getAllTasks();
-                final int numTasks = tasks.size();
-                int[] taskIds = new int[numTasks];
-                String[] taskNames = new String[numTasks];
-                for (int i = 0; i < numTasks; ++i) {
-                    final TaskRecord task = tasks.get(i);
-                    taskIds[i] = task.taskId;
-                    taskNames[i] = task.origActivity != null ? task.origActivity.flattenToString()
-                            : task.realActivity != null ? task.realActivity.flattenToString()
-                            : task.getTopActivity() != null ? task.getTopActivity().packageName
-                            : "unknown";
-                }
-                stackInfo.taskIds = taskIds;
-                stackInfo.taskNames = taskNames;
-                list.add(stackInfo);
-            }
-            return list;
-        }
-    }
-
-    private void addStackInfoToStackBoxInfo(StackBoxInfo stackBoxInfo, List<StackInfo> stackInfos) {
-        final int stackId = stackBoxInfo.stackId;
-        if (stackId >= 0) {
-            for (StackInfo stackInfo : stackInfos) {
-                if (stackId == stackInfo.stackId) {
-                    stackBoxInfo.stack = stackInfo;
-                    stackInfos.remove(stackInfo);
-                    return;
-                }
-            }
-        } else {
-            addStackInfoToStackBoxInfo(stackBoxInfo.children[0], stackInfos);
-            addStackInfoToStackBoxInfo(stackBoxInfo.children[1], stackInfos);
-        }
-    }
-
-    @Override
-    public List<StackBoxInfo> getStackBoxes() {
-        enforceCallingPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS,
-                "getStackBoxes()");
-        long ident = Binder.clearCallingIdentity();
-        try {
-            List<StackBoxInfo> stackBoxInfos = mWindowManager.getStackBoxInfos();
-            synchronized (this) {
-                List<StackInfo> stackInfos = getStacks();
-                for (StackBoxInfo stackBoxInfo : stackBoxInfos) {
-                    addStackInfoToStackBoxInfo(stackBoxInfo, stackInfos);
-                }
-            }
-            return stackBoxInfos;
+            mWindowManager.resizeStack(stackBoxId, bounds);
         } finally {
             Binder.restoreCallingIdentity(ident);
         }
     }
 
     @Override
-    public StackBoxInfo getStackBoxInfo(int stackBoxId) {
+    public List<StackInfo> getAllStackInfos() {
         enforceCallingPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS,
-                "getStackBoxInfo()");
+                "getAllStackInfos()");
         long ident = Binder.clearCallingIdentity();
         try {
-            List<StackBoxInfo> stackBoxInfos = mWindowManager.getStackBoxInfos();
-            StackBoxInfo info = null;
             synchronized (this) {
-                List<StackInfo> stackInfos = getStacks();
-                for (StackBoxInfo stackBoxInfo : stackBoxInfos) {
-                    addStackInfoToStackBoxInfo(stackBoxInfo, stackInfos);
-                    if (stackBoxInfo.stackBoxId == stackBoxId) {
-                        info = stackBoxInfo;
-                    }
-                }
+                return mStackSupervisor.getAllStackInfosLocked();
             }
-            return info;
+        } finally {
+            Binder.restoreCallingIdentity(ident);
+        }
+    }
+
+    @Override
+    public StackInfo getStackInfo(int stackId) {
+        enforceCallingPermission(android.Manifest.permission.MANAGE_ACTIVITY_STACKS,
+                "getStackInfo()");
+        long ident = Binder.clearCallingIdentity();
+        try {
+            synchronized (this) {
+                return mStackSupervisor.getStackInfoLocked(stackId);
+            }
         } finally {
             Binder.restoreCallingIdentity(ident);
         }
@@ -8061,11 +7981,11 @@ public final class ActivityManagerService extends ActivityManagerNative
         }
     }
 
-    public static final void installSystemProviders() {
+    public final void installSystemProviders() {
         List<ProviderInfo> providers;
-        synchronized (mSelf) {
-            ProcessRecord app = mSelf.mProcessNames.get("system", Process.SYSTEM_UID);
-            providers = mSelf.generateApplicationProvidersLocked(app);
+        synchronized (this) {
+            ProcessRecord app = mProcessNames.get("system", Process.SYSTEM_UID);
+            providers = generateApplicationProvidersLocked(app);
             if (providers != null) {
                 for (int i=providers.size()-1; i>=0; i--) {
                     ProviderInfo pi = (ProviderInfo)providers.get(i);
@@ -8081,9 +8001,9 @@ public final class ActivityManagerService extends ActivityManagerNative
             mSystemThread.installSystemProviders(providers);
         }
 
-        mSelf.mCoreSettingsObserver = new CoreSettingsObserver(mSelf);
+        mCoreSettingsObserver = new CoreSettingsObserver(this);
 
-        mSelf.mUsageStatsService.monitorPackages();
+        mUsageStatsService.monitorPackages();
     }
 
     /**
@@ -8248,13 +8168,7 @@ public final class ActivityManagerService extends ActivityManagerNative
         return mSleeping || mShuttingDown;
     }
 
-    public void goingToSleep() {
-        if (checkCallingPermission(android.Manifest.permission.DEVICE_POWER)
-                != PackageManager.PERMISSION_GRANTED) {
-            throw new SecurityException("Requires permission "
-                    + android.Manifest.permission.DEVICE_POWER);
-        }
-
+    void goingToSleep() {
         synchronized(this) {
             mWentToSleep = true;
             updateEventDispatchingLocked();
@@ -8329,13 +8243,7 @@ public final class ActivityManagerService extends ActivityManagerNative
         }
     }
 
-    public void wakingUp() {
-        if (checkCallingPermission(android.Manifest.permission.DEVICE_POWER)
-                != PackageManager.PERMISSION_GRANTED) {
-            throw new SecurityException("Requires permission "
-                    + android.Manifest.permission.DEVICE_POWER);
-        }
-
+    void wakingUp() {
         synchronized(this) {
             mWentToSleep = false;
             updateEventDispatchingLocked();
@@ -9055,25 +8963,6 @@ public final class ActivityManagerService extends ActivityManagerNative
         }
     }
 
-    public final void startRunning(String pkg, String cls, String action,
-            String data) {
-        synchronized(this) {
-            if (mStartRunning) {
-                return;
-            }
-            mStartRunning = true;
-            mTopComponent = pkg != null && cls != null
-                    ? new ComponentName(pkg, cls) : null;
-            mTopAction = action != null ? action : Intent.ACTION_MAIN;
-            mTopData = data;
-            if (!mSystemReady) {
-                return;
-            }
-        }
-
-        systemReady(null);
-    }
-
     private void retrieveSettings() {
         final ContentResolver resolver = mContext.getContentResolver();
         String debugApp = Settings.Global.getString(
@@ -9225,8 +9114,13 @@ public final class ActivityManagerService extends ActivityManagerNative
                         ActivityInfo ai = ris.get(i).activityInfo;
                         ComponentName comp = new ComponentName(ai.packageName, ai.name);
                         if (lastDoneReceivers.contains(comp)) {
+                            // We already did the pre boot receiver for this app with the current
+                            // platform version, so don't do it again...
                             ris.remove(i);
                             i--;
+                            // ...however, do keep it as one that has been done, so we don't
+                            // forget about it when rewriting the file of last done receivers.
+                            doneReceivers.add(comp);
                         }
                     }
 
@@ -9281,9 +9175,6 @@ public final class ActivityManagerService extends ActivityManagerNative
 
             mAppOpsService.systemReady();
             mSystemReady = true;
-            if (!mStartRunning) {
-                return;
-            }
         }
 
         ArrayList<ProcessRecord> procsToKill = null;
@@ -9321,7 +9212,7 @@ public final class ActivityManagerService extends ActivityManagerNative
         synchronized(this) {
             // Make sure we have no pre-ready processes sitting around.
             
-            if (mFactoryTest == SystemServer.FACTORY_TEST_LOW_LEVEL) {
+            if (mFactoryTest == FactoryTest.FACTORY_TEST_LOW_LEVEL) {
                 ResolveInfo ri = mContext.getPackageManager()
                         .resolveActivity(new Intent(Intent.ACTION_FACTORY_TEST),
                                 STOCK_PM_FLAGS);
@@ -9363,7 +9254,7 @@ public final class ActivityManagerService extends ActivityManagerNative
         if (goingCallback != null) goingCallback.run();
         
         synchronized (this) {
-            if (mFactoryTest != SystemServer.FACTORY_TEST_LOW_LEVEL) {
+            if (mFactoryTest != FactoryTest.FACTORY_TEST_LOW_LEVEL) {
                 try {
                     List apps = AppGlobals.getPackageManager().
                         getPersistentApplications(STOCK_PM_FLAGS);
@@ -9496,10 +9387,6 @@ public final class ActivityManagerService extends ActivityManagerNative
 
     private boolean handleAppCrashLocked(ProcessRecord app, String shortMsg, String longMsg,
             String stackTrace) {
-        if (mHeadless) {
-            Log.e(TAG, "handleAppCrashLocked: " + app.processName);
-            return false;
-        }
         long now = SystemClock.uptimeMillis();
 
         Long crashTime;
@@ -10967,8 +10854,7 @@ public final class ActivityManagerService extends ActivityManagerNative
             }
             if (dumpAll) {
                 pw.println("  Total persistent processes: " + numPers);
-                pw.println("  mStartRunning=" + mStartRunning
-                        + " mProcessesReady=" + mProcessesReady
+                pw.println("  mProcessesReady=" + mProcessesReady
                         + " mSystemReady=" + mSystemReady);
                 pw.println("  mBooting=" + mBooting
                         + " mBooted=" + mBooted
@@ -12388,6 +12274,7 @@ public final class ActivityManagerService extends ActivityManagerNative
             boolean restarting, boolean allowRestart, int index) {
         if (index >= 0) {
             removeLruProcessLocked(app);
+            ProcessList.remove(app.pid);
         }
 
         mProcessesToGc.remove(app);
@@ -14042,9 +13929,6 @@ public final class ActivityManagerService extends ActivityManagerNative
      */
     boolean updateConfigurationLocked(Configuration values,
             ActivityRecord starting, boolean persistent, boolean initLocale) {
-        // do nothing if we are headless
-        if (mHeadless) return true;
-
         int changes = 0;
 
         if (values != null) {
@@ -14127,18 +14011,21 @@ public final class ActivityManagerService extends ActivityManagerNative
 
         boolean kept = true;
         final ActivityStack mainStack = mStackSupervisor.getFocusedStack();
-        if (changes != 0 && starting == null) {
-            // If the configuration changed, and the caller is not already
-            // in the process of starting an activity, then find the top
-            // activity to check if its configuration needs to change.
-            starting = mainStack.topRunningActivityLocked(null);
-        }
+        // mainStack is null during startup.
+        if (mainStack != null) {
+            if (changes != 0 && starting == null) {
+                // If the configuration changed, and the caller is not already
+                // in the process of starting an activity, then find the top
+                // activity to check if its configuration needs to change.
+                starting = mainStack.topRunningActivityLocked(null);
+            }
 
-        if (starting != null) {
-            kept = mainStack.ensureActivityConfigurationLocked(starting, changes);
-            // And we need to make sure at this point that all other activities
-            // are made visible with the correct configuration.
-            mStackSupervisor.ensureActivitiesVisibleLocked(starting, changes);
+            if (starting != null) {
+                kept = mainStack.ensureActivityConfigurationLocked(starting, changes);
+                // And we need to make sure at this point that all other activities
+                // are made visible with the correct configuration.
+                mStackSupervisor.ensureActivitiesVisibleLocked(starting, changes);
+            }
         }
 
         if (values != null && mWindowManager != null) {
@@ -15250,16 +15137,13 @@ public final class ActivityManagerService extends ActivityManagerNative
         }
 
         if (app.curAdj != app.setAdj) {
-            if (Process.setOomAdj(app.pid, app.curAdj)) {
-                if (DEBUG_SWITCH || DEBUG_OOM_ADJ) Slog.v(
-                    TAG, "Set " + app.pid + " " + app.processName +
-                    " adj " + app.curAdj + ": " + app.adjType);
-                app.setAdj = app.curAdj;
-            } else {
-                success = false;
-                Slog.w(TAG, "Failed setting oom adj of " + app + " to " + app.curAdj);
-            }
+            ProcessList.setOomAdj(app.pid, app.curAdj);
+            if (DEBUG_SWITCH || DEBUG_OOM_ADJ) Slog.v(
+                TAG, "Set " + app.pid + " " + app.processName +
+                " adj " + app.curAdj + ": " + app.adjType);
+            app.setAdj = app.curAdj;
         }
+
         if (app.setSchedGroup != app.curSchedGroup) {
             app.setSchedGroup = app.curSchedGroup;
             if (DEBUG_SWITCH || DEBUG_OOM_ADJ) Slog.v(TAG,
@@ -16613,5 +16497,17 @@ public final class ActivityManagerService extends ActivityManagerNative
         ActivityInfo info = new ActivityInfo(aInfo);
         info.applicationInfo = getAppInfoForUser(info.applicationInfo, userId);
         return info;
+    }
+
+    private final class LocalService extends ActivityManagerInternal {
+        @Override
+        public void goingToSleep() {
+            ActivityManagerService.this.goingToSleep();
+        }
+
+        @Override
+        public void wakingUp() {
+            ActivityManagerService.this.wakingUp();
+        }
     }
 }
