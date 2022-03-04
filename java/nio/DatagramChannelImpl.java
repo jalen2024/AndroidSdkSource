@@ -98,13 +98,6 @@ class DatagramChannelImpl extends DatagramChannel implements FileDescriptorChann
     }
 
     /**
-     * Returns the local address to which the socket is bound.
-     */
-    InetAddress getLocalAddress() {
-        return IoBridge.getSocketLocalAddress(fd);
-    }
-
-    /**
      * @see java.nio.channels.DatagramChannel#isConnected()
      */
     @Override
@@ -266,6 +259,7 @@ class DatagramChannelImpl extends DatagramChannel implements FileDescriptorChann
                 if (sendCount > 0) {
                     source.position(oldPosition + sendCount);
                 }
+                isBound = true;
             } finally {
                 end(sendCount >= 0);
             }
@@ -420,9 +414,7 @@ class DatagramChannelImpl extends DatagramChannel implements FileDescriptorChann
     }
 
     @Override protected void implConfigureBlocking(boolean blocking) throws IOException {
-        synchronized (blockingLock()) {
-            IoUtils.setBlocking(fd, blocking);
-        }
+        IoUtils.setBlocking(fd, blocking);
     }
 
     /*
@@ -514,12 +506,12 @@ class DatagramChannelImpl extends DatagramChannel implements FileDescriptorChann
             return channelImpl.connectAddress.getAddress();
         }
 
-        /**
-         * @see java.net.DatagramSocket#getLocalAddress()
-         */
-        @Override
-        public InetAddress getLocalAddress() {
-            return channelImpl.getLocalAddress();
+        @Override public InetAddress getLocalAddress() {
+            try {
+                return IoBridge.getSocketLocalAddress(channelImpl.fd);
+            } catch (SocketException ex) {
+                return null;
+            }
         }
 
         /**

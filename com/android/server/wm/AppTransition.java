@@ -147,6 +147,8 @@ public class AppTransition implements Dump {
     private final Interpolator mDecelerateInterpolator;
     private final Interpolator mThumbnailFadeoutInterpolator;
 
+    private int mCurrentUserId = 0;
+
     AppTransition(Context context, Handler h) {
         mContext = context;
         mH = h;
@@ -259,7 +261,7 @@ public class AppTransition implements Dump {
             if (DEBUG_ANIM) Slog.v(TAG, "Loading animations: picked package="
                     + packageName);
             return AttributeCache.instance().get(packageName, resId,
-                    com.android.internal.R.styleable.WindowAnimation);
+                    com.android.internal.R.styleable.WindowAnimation, mCurrentUserId);
         }
         return null;
     }
@@ -274,7 +276,7 @@ public class AppTransition implements Dump {
             if (DEBUG_ANIM) Slog.v(TAG, "Loading animations: picked package="
                     + packageName);
             return AttributeCache.instance().get(packageName, resId,
-                    com.android.internal.R.styleable.WindowAnimation);
+                    com.android.internal.R.styleable.WindowAnimation, mCurrentUserId);
         }
         return null;
     }
@@ -720,7 +722,7 @@ public class AppTransition implements Dump {
     @Override
     public void dump(PrintWriter pw) {
         pw.print(" " + this);
-        pw.print(" mAppTransitionState="); pw.println(appStateToString());
+        pw.print("  mAppTransitionState="); pw.println(appStateToString());
         if (mNextAppTransitionType != NEXT_TRANSIT_TYPE_NONE) {
             pw.print("  mNextAppTransitionType="); pw.println(transitTypeToString());
         }
@@ -757,5 +759,9 @@ public class AppTransition implements Dump {
             pw.print("  mNextAppTransitionCallback=");
             pw.println(mNextAppTransitionCallback);
         }
+    }
+
+    public void setCurrentUser(int newUserId) {
+        mCurrentUserId = newUserId;
     }
 }

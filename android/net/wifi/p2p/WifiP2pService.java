@@ -48,6 +48,7 @@ import android.net.wifi.p2p.nsd.WifiP2pServiceInfo;
 import android.net.wifi.p2p.nsd.WifiP2pServiceRequest;
 import android.net.wifi.p2p.nsd.WifiP2pServiceResponse;
 import android.os.Binder;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.INetworkManagementService;
 import android.os.Handler;
@@ -84,6 +85,8 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+
 
 /**
  * WifiP2pService includes a state machine to perform Wi-Fi p2p operations. Applications
@@ -166,6 +169,19 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
 
     public static final int SET_MIRACAST_MODE               =   BASE + 14;
 
+    // During dhcp (and perhaps other times) we can't afford to drop packets
+    // but Discovery will switch our channel enough we will.
+    //   msg.arg1 = ENABLED for blocking, DISABLED for resumed.
+    //   msg.arg2 = msg to send when blocked
+    //   msg.obj  = StateMachine to send to when blocked
+    public static final int BLOCK_DISCOVERY                 =   BASE + 15;
+
+    // set country code
+    public static final int SET_COUNTRY_CODE                =   BASE + 16;
+
+    public static final int ENABLED                         = 1;
+    public static final int DISABLED                        = 0;
+
     private final boolean mP2pSupported;
 
     private WifiP2pDevice mThisDevice = new WifiP2pDevice();
@@ -182,6 +198,19 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
      * broadcasts
      */
     private boolean mDiscoveryStarted;
+    /* Track whether servcice/peer discovery is blocked in favor of other wifi actions
+     * (notably dhcp)
+     */
+    private boolean mDiscoveryBlocked;
+
+    // Supplicant doesn't like setting the same country code multiple times (it may drop
+    // current connected network), so we save the country code here to avoid redundency
+    private String mLastSetCountryCode;
+
+    /*
+     * remember if we were in a scan when it had to be stopped
+     */
+    private boolean mDiscoveryPostponed = false;
 
     private NetworkInfo mNetworkInfo;
 
@@ -479,6 +508,20 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
                     AsyncChannel ac = new AsyncChannel();
                     ac.connect(mContext, getHandler(), message.replyTo);
                     break;
+                case BLOCK_DISCOVERY:
+                    mDiscoveryBlocked = (message.arg1 == ENABLED ? true : false);
+                    // always reset this - we went to a state that doesn't support discovery so
+                    // it would have stopped regardless
+                    mDiscoveryPostponed = false;
+                    if (mDiscoveryBlocked) {
+                        try {
+                            StateMachine m = (StateMachine)message.obj;
+                            m.sendMessage(message.arg2);
+                        } catch (Exception e) {
+                            loge("unable to send BLOCK_DISCOVERY response: " + e);
+                        }
+                    }
+                    break;
                 case WifiP2pManager.DISCOVER_PEERS:
                     replyToMessage(message, WifiP2pManager.DISCOVER_PEERS_FAILED,
                             WifiP2pManager.BUSY);
@@ -595,6 +638,10 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
                 case DhcpStateMachine.CMD_ON_QUIT:
                 case WifiMonitor.P2P_PROV_DISC_FAILURE_EVENT:
                 case SET_MIRACAST_MODE:
+                case WifiP2pManager.START_LISTEN:
+                case WifiP2pManager.STOP_LISTEN:
+                case WifiP2pManager.SET_CHANNEL:
+                case SET_COUNTRY_CODE:
                     break;
                 case WifiStateMachine.CMD_ENABLE_P2P:
                     // Enable is lazy and has no response
@@ -696,7 +743,16 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
                     replyToMessage(message, WifiP2pManager.START_WPS_FAILED,
                             WifiP2pManager.P2P_UNSUPPORTED);
                     break;
-               default:
+                case WifiP2pManager.START_LISTEN:
+                    replyToMessage(message, WifiP2pManager.START_LISTEN_FAILED,
+                            WifiP2pManager.P2P_UNSUPPORTED);
+                    break;
+                case WifiP2pManager.STOP_LISTEN:
+                    replyToMessage(message, WifiP2pManager.STOP_LISTEN_FAILED,
+                            WifiP2pManager.P2P_UNSUPPORTED);
+                    break;
+
+                default:
                     return NOT_HANDLED;
             }
             return HANDLED;
@@ -825,7 +881,7 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
                     }
                     if (mGroups.clear()) sendP2pPersistentGroupsChangedBroadcast();
 
-                    mWifiNative.closeSupplicantConnection();
+                    mWifiMonitor.stopMonitoring();
                     transitionTo(mP2pDisablingState);
                     break;
                 case WifiP2pManager.SET_DEVICE_NAME:
@@ -851,7 +907,33 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
                     }
                     break;
                 }
+                case BLOCK_DISCOVERY:
+                    boolean blocked = (message.arg1 == ENABLED ? true : false);
+                    if (mDiscoveryBlocked == blocked) break;
+                    mDiscoveryBlocked = blocked;
+                    if (blocked && mDiscoveryStarted) {
+                        mWifiNative.p2pStopFind();
+                        mDiscoveryPostponed = true;
+                    }
+                    if (!blocked && mDiscoveryPostponed) {
+                        mDiscoveryPostponed = false;
+                        mWifiNative.p2pFind(DISCOVER_TIMEOUT_S);
+                    }
+                    if (blocked) {
+                        try {
+                            StateMachine m = (StateMachine)message.obj;
+                            m.sendMessage(message.arg2);
+                        } catch (Exception e) {
+                            loge("unable to send BLOCK_DISCOVERY response: " + e);
+                        }
+                    }
+                    break;
                 case WifiP2pManager.DISCOVER_PEERS:
+                    if (mDiscoveryBlocked) {
+                        replyToMessage(message, WifiP2pManager.DISCOVER_PEERS_FAILED,
+                                WifiP2pManager.BUSY);
+                        break;
+                    }
                     // do not send service discovery request while normal find operation.
                     clearSupplicantServiceRequest();
                     if (mWifiNative.p2pFind(DISCOVER_TIMEOUT_S)) {
@@ -874,6 +956,11 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
                     }
                     break;
                 case WifiP2pManager.DISCOVER_SERVICES:
+                    if (mDiscoveryBlocked) {
+                        replyToMessage(message, WifiP2pManager.DISCOVER_SERVICES_FAILED,
+                                WifiP2pManager.BUSY);
+                        break;
+                    }
                     if (DBG) logd(getName() + " discover services");
                     if (!updateSupplicantServiceRequest()) {
                         replyToMessage(message, WifiP2pManager.DISCOVER_SERVICES_FAILED,
@@ -958,6 +1045,45 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
                 case SET_MIRACAST_MODE:
                     mWifiNative.setMiracastMode(message.arg1);
                     break;
+                case WifiP2pManager.START_LISTEN:
+                    if (DBG) logd(getName() + " start listen mode");
+                    mWifiNative.p2pFlush();
+                    if (mWifiNative.p2pExtListen(true, 500, 500)) {
+                        replyToMessage(message, WifiP2pManager.START_LISTEN_SUCCEEDED);
+                    } else {
+                        replyToMessage(message, WifiP2pManager.START_LISTEN_FAILED);
+                    }
+                    break;
+                case WifiP2pManager.STOP_LISTEN:
+                    if (DBG) logd(getName() + " stop listen mode");
+                    if (mWifiNative.p2pExtListen(false, 0, 0)) {
+                        replyToMessage(message, WifiP2pManager.STOP_LISTEN_SUCCEEDED);
+                    } else {
+                        replyToMessage(message, WifiP2pManager.STOP_LISTEN_FAILED);
+                    }
+                    mWifiNative.p2pFlush();
+                    break;
+                case WifiP2pManager.SET_CHANNEL:
+                    Bundle p2pChannels = (Bundle) message.obj;
+                    int lc = p2pChannels.getInt("lc", 0);
+                    int oc = p2pChannels.getInt("oc", 0);
+                    if (DBG) logd(getName() + " set listen and operating channel");
+                    if (mWifiNative.p2pSetChannel(lc, oc)) {
+                        replyToMessage(message, WifiP2pManager.SET_CHANNEL_SUCCEEDED);
+                    } else {
+                        replyToMessage(message, WifiP2pManager.SET_CHANNEL_FAILED);
+                    }
+                    break;
+                case SET_COUNTRY_CODE:
+                    String countryCode = (String) message.obj;
+                    countryCode = countryCode.toUpperCase(Locale.ROOT);
+                    if (mLastSetCountryCode == null ||
+                            countryCode.equals(mLastSetCountryCode) == false) {
+                        if (mWifiNative.setCountryCode(countryCode)) {
+                            mLastSetCountryCode = countryCode;
+                        }
+                    }
+                    break;
                 default:
                    return NOT_HANDLED;
             }
@@ -968,6 +1094,8 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
         public void exit() {
             sendP2pStateChangedBroadcast(false);
             mNetworkInfo.setIsAvailable(false);
+
+            mLastSetCountryCode = null;
         }
     }
 
@@ -1105,6 +1233,35 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
                     } else {
                         loge("Unexpected group creation, remove " + mGroup);
                         mWifiNative.p2pGroupRemove(mGroup.getInterface());
+                    }
+                    break;
+                case WifiP2pManager.START_LISTEN:
+                    if (DBG) logd(getName() + " start listen mode");
+                    mWifiNative.p2pFlush();
+                    if (mWifiNative.p2pExtListen(true, 500, 500)) {
+                        replyToMessage(message, WifiP2pManager.START_LISTEN_SUCCEEDED);
+                    } else {
+                        replyToMessage(message, WifiP2pManager.START_LISTEN_FAILED);
+                    }
+                    break;
+                case WifiP2pManager.STOP_LISTEN:
+                    if (DBG) logd(getName() + " stop listen mode");
+                    if (mWifiNative.p2pExtListen(false, 0, 0)) {
+                        replyToMessage(message, WifiP2pManager.STOP_LISTEN_SUCCEEDED);
+                    } else {
+                        replyToMessage(message, WifiP2pManager.STOP_LISTEN_FAILED);
+                    }
+                    mWifiNative.p2pFlush();
+                    break;
+                case WifiP2pManager.SET_CHANNEL:
+                    Bundle p2pChannels = (Bundle) message.obj;
+                    int lc = p2pChannels.getInt("lc", 0);
+                    int oc = p2pChannels.getInt("oc", 0);
+                    if (DBG) logd(getName() + " set listen and operating channel");
+                    if (mWifiNative.p2pSetChannel(lc, oc)) {
+                        replyToMessage(message, WifiP2pManager.SET_CHANNEL_SUCCEEDED);
+                    } else {
+                        replyToMessage(message, WifiP2pManager.SET_CHANNEL_FAILED);
                     }
                     break;
                 default:
@@ -2401,6 +2558,12 @@ public class WifiP2pService extends IWifiP2pManager.Stub {
         mWifiNative.p2pServiceFlush();
         mServiceTransactionId = 0;
         mServiceDiscReqId = null;
+
+        String countryCode = Settings.Global.getString(mContext.getContentResolver(),
+                Settings.Global.WIFI_COUNTRY_CODE);
+        if (countryCode != null && !countryCode.isEmpty()) {
+            mP2pStateMachine.sendMessage(SET_COUNTRY_CODE, countryCode);
+        }
 
         updatePersistentNetworks(RELOAD);
     }

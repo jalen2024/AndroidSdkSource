@@ -417,7 +417,15 @@ public class NsdService extends INsdManager.Stub {
                 int keyId = clientInfo.mClientIds.indexOfValue(id);
                 if (keyId != -1) {
                     clientId = clientInfo.mClientIds.keyAt(keyId);
+                } else {
+                    // This can happen because of race conditions. For example,
+                    // SERVICE_FOUND may race with STOP_SERVICE_DISCOVERY,
+                    // and we may get in this situation.
+                    Slog.d(TAG, "Notification for a listener that is no longer active: " + id);
+                    handled = false;
+                    return handled;
                 }
+
                 switch (code) {
                     case NativeResponseCode.SERVICE_FOUND:
                         /* NNN uniqueId serviceName regType domain */
@@ -475,10 +483,14 @@ public class NsdService extends INsdManager.Stub {
                         clientInfo.mResolvedService.setPort(Integer.parseInt(cooked[4]));
 
                         stopResolveService(id);
-                        if (!getAddrInfo(id, cooked[3])) {
+                        removeRequestMap(clientId, id, clientInfo);
+
+                        int id2 = getUniqueId();
+                        if (getAddrInfo(id2, cooked[3])) {
+                            storeRequestMap(clientId, id2, clientInfo);
+                        } else {
                             clientInfo.mChannel.sendMessage(NsdManager.RESOLVE_SERVICE_FAILED,
                                     NsdManager.FAILURE_INTERNAL_ERROR, clientId);
-                            removeRequestMap(clientId, id, clientInfo);
                             clientInfo.mResolvedService = null;
                         }
                         break;

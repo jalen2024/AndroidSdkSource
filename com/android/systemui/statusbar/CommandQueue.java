@@ -19,8 +19,8 @@ package com.android.systemui.statusbar;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
-
 import android.service.notification.StatusBarNotification;
+
 import com.android.internal.statusbar.IStatusBar;
 import com.android.internal.statusbar.StatusBarIcon;
 import com.android.internal.statusbar.StatusBarIconList;
@@ -55,7 +55,7 @@ public class CommandQueue extends IStatusBar.Stub {
     private static final int MSG_TOGGLE_RECENT_APPS         = 13 << MSG_SHIFT;
     private static final int MSG_PRELOAD_RECENT_APPS        = 14 << MSG_SHIFT;
     private static final int MSG_CANCEL_PRELOAD_RECENT_APPS = 15 << MSG_SHIFT;
-    private static final int MSG_SET_NAVIGATION_ICON_HINTS  = 16 << MSG_SHIFT;
+    private static final int MSG_SET_WINDOW_STATE           = 16 << MSG_SHIFT;
 
     public static final int FLAG_EXCLUDE_NONE = 0;
     public static final int FLAG_EXCLUDE_SEARCH_PANEL = 1 << 0;
@@ -97,7 +97,7 @@ public class CommandQueue extends IStatusBar.Stub {
         public void showSearchPanel();
         public void hideSearchPanel();
         public void cancelPreloadRecentApps();
-        public void setNavigationIconHints(int hints);
+        public void setWindowState(int window, int state);
     }
 
     public CommandQueue(Callbacks callbacks, StatusBarIconList list) {
@@ -225,10 +225,10 @@ public class CommandQueue extends IStatusBar.Stub {
         }
     }
 
-    public void setNavigationIconHints(int hints) {
+    public void setWindowState(int window, int state) {
         synchronized (mList) {
-            mHandler.removeMessages(MSG_SET_NAVIGATION_ICON_HINTS);
-            mHandler.obtainMessage(MSG_SET_NAVIGATION_ICON_HINTS, hints, 0, null).sendToTarget();
+            // don't coalesce these
+            mHandler.obtainMessage(MSG_SET_WINDOW_STATE, window, state, null).sendToTarget();
         }
     }
 
@@ -309,8 +309,8 @@ public class CommandQueue extends IStatusBar.Stub {
                 case MSG_CANCEL_PRELOAD_RECENT_APPS:
                     mCallbacks.cancelPreloadRecentApps();
                     break;
-                case MSG_SET_NAVIGATION_ICON_HINTS:
-                    mCallbacks.setNavigationIconHints(msg.arg1);
+                case MSG_SET_WINDOW_STATE:
+                    mCallbacks.setWindowState(msg.arg1, msg.arg2);
                     break;
             }
         }

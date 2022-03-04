@@ -152,6 +152,11 @@ public class PhoneNumberUtils
         String number = null;
 
         Uri uri = intent.getData();
+
+        if (uri == null) {
+            return null;
+        }
+
         String scheme = uri.getScheme();
 
         if (scheme.equals("tel") || scheme.equals("sip")) {
@@ -1800,7 +1805,7 @@ public class PhoneNumberUtils
         String countryIso;
         CountryDetector detector = (CountryDetector) context.getSystemService(
                 Context.COUNTRY_DETECTOR);
-        if (detector != null) {
+        if (detector != null && detector.detectCountry() != null) {
             countryIso = detector.detectCountry().getCountryIso();
         } else {
             Locale locale = context.getResources().getConfiguration().locale;
@@ -1945,6 +1950,27 @@ public class PhoneNumberUtils
                     return cdmaCheckAndProcessPlusCodeByNumberFormat(dialStr,
                             getFormatTypeFromCountryCode(currIso),
                             getFormatTypeFromCountryCode(defaultIso));
+                }
+            }
+        }
+        return dialStr;
+    }
+
+    /**
+     * Process phone number for CDMA, converting plus code using the home network number format.
+     * This is used for outgoing SMS messages.
+     *
+     * @param dialStr the original dial string
+     * @return the converted dial string
+     * @hide for internal use
+     */
+    public static String cdmaCheckAndProcessPlusCodeForSms(String dialStr) {
+        if (!TextUtils.isEmpty(dialStr)) {
+            if (isReallyDialable(dialStr.charAt(0)) && isNonSeparator(dialStr)) {
+                String defaultIso = SystemProperties.get(PROPERTY_ICC_OPERATOR_ISO_COUNTRY, "");
+                if (!TextUtils.isEmpty(defaultIso)) {
+                    int format = getFormatTypeFromCountryCode(defaultIso);
+                    return cdmaCheckAndProcessPlusCodeByNumberFormat(dialStr, format, format);
                 }
             }
         }

@@ -16,15 +16,13 @@
 
 package android.os;
 
+import android.util.ArrayMap;
 import android.util.Log;
 import android.util.SparseArray;
 
 import java.io.Serializable;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -32,18 +30,23 @@ import java.util.Set;
  *
  */
 public final class Bundle implements Parcelable, Cloneable {
-    private static final String LOG_TAG = "Bundle";
+    private static final String TAG = "Bundle";
+    static final boolean DEBUG = false;
     public static final Bundle EMPTY;
+
+    static final int BUNDLE_MAGIC = 0x4C444E42; // 'B' 'N' 'D' 'L'
+    static final Parcel EMPTY_PARCEL;
 
     static {
         EMPTY = new Bundle();
-        EMPTY.mMap = Collections.unmodifiableMap(new HashMap<String, Object>());
+        EMPTY.mMap = ArrayMap.EMPTY;
+        EMPTY_PARCEL = Parcel.obtain();
     }
 
     // Invariant - exactly one of mMap / mParcelledData will be null
     // (except inside a call to unparcel)
 
-    /* package */ Map<String, Object> mMap = null;
+    /* package */ ArrayMap<String, Object> mMap = null;
 
     /*
      * If mParcelledData is non-null, then mMap will be null and the
@@ -65,7 +68,7 @@ public final class Bundle implements Parcelable, Cloneable {
      * Constructs a new, empty Bundle.
      */
     public Bundle() {
-        mMap = new HashMap<String, Object>();
+        mMap = new ArrayMap<String, Object>();
         mClassLoader = getClass().getClassLoader();
     }
 
@@ -91,7 +94,7 @@ public final class Bundle implements Parcelable, Cloneable {
      * inside of the Bundle.
      */
     public Bundle(ClassLoader loader) {
-        mMap = new HashMap<String, Object>();
+        mMap = new ArrayMap<String, Object>();
         mClassLoader = loader;
     }
 
@@ -102,7 +105,7 @@ public final class Bundle implements Parcelable, Cloneable {
      * @param capacity the initial capacity of the Bundle
      */
     public Bundle(int capacity) {
-        mMap = new HashMap<String, Object>(capacity);
+        mMap = new ArrayMap<String, Object>(capacity);
         mClassLoader = getClass().getClassLoader();
     }
 
@@ -114,15 +117,19 @@ public final class Bundle implements Parcelable, Cloneable {
      */
     public Bundle(Bundle b) {
         if (b.mParcelledData != null) {
-            mParcelledData = Parcel.obtain();
-            mParcelledData.appendFrom(b.mParcelledData, 0, b.mParcelledData.dataSize());
-            mParcelledData.setDataPosition(0);
+            if (b.mParcelledData == EMPTY_PARCEL) {
+                mParcelledData = EMPTY_PARCEL;
+            } else {
+                mParcelledData = Parcel.obtain();
+                mParcelledData.appendFrom(b.mParcelledData, 0, b.mParcelledData.dataSize());
+                mParcelledData.setDataPosition(0);
+            }
         } else {
             mParcelledData = null;
         }
 
         if (b.mMap != null) {
-            mMap = new HashMap<String, Object>(b.mMap);
+            mMap = new ArrayMap<String, Object>(b.mMap);
         } else {
             mMap = null;
         }
@@ -157,12 +164,12 @@ public final class Bundle implements Parcelable, Cloneable {
         unparcel();
         int size = mMap.size();
         if (size > 1) {
-            Log.w(LOG_TAG, "getPairValue() used on Bundle with multiple pairs.");
+            Log.w(TAG, "getPairValue() used on Bundle with multiple pairs.");
         }
         if (size == 0) {
             return null;
         }
-        Object o = mMap.values().iterator().next();
+        Object o = mMap.valueAt(0);
         try {
             return (String) o;
         } catch (ClassCastException e) {
@@ -210,19 +217,40 @@ public final class Bundle implements Parcelable, Cloneable {
      */
     /* package */ synchronized void unparcel() {
         if (mParcelledData == null) {
+            if (DEBUG) Log.d(TAG, "unparcel " + Integer.toHexString(System.identityHashCode(this))
+                    + ": no parcelled data");
+            return;
+        }
+
+        if (mParcelledData == EMPTY_PARCEL) {
+            if (DEBUG) Log.d(TAG, "unparcel " + Integer.toHexString(System.identityHashCode(this))
+                    + ": empty");
+            if (mMap == null) {
+                mMap = new ArrayMap<String, Object>(1);
+            } else {
+                mMap.erase();
+            }
+            mParcelledData = null;
             return;
         }
 
         int N = mParcelledData.readInt();
+        if (DEBUG) Log.d(TAG, "unparcel " + Integer.toHexString(System.identityHashCode(this))
+                + ": reading " + N + " maps");
         if (N < 0) {
             return;
         }
         if (mMap == null) {
-            mMap = new HashMap<String, Object>(N);
+            mMap = new ArrayMap<String, Object>(N);
+        } else {
+            mMap.erase();
+            mMap.ensureCapacity(N);
         }
-        mParcelledData.readMapInternal(mMap, N, mClassLoader);
+        mParcelledData.readArrayMapInternal(mMap, N, mClassLoader);
         mParcelledData.recycle();
         mParcelledData = null;
+        if (DEBUG) Log.d(TAG, "unparcel " + Integer.toHexString(System.identityHashCode(this))
+                + " final map: " + mMap);
     }
 
     /**
@@ -331,9 +359,8 @@ public final class Bundle implements Parcelable, Cloneable {
                 }
             } else {
                 // It's been unparcelled, so we need to walk the map
-                Iterator<Map.Entry<String, Object>> iter = mMap.entrySet().iterator();
-                while (!fdFound && iter.hasNext()) {
-                    Object obj = iter.next().getValue();
+                for (int i=mMap.size()-1; i>=0; i--) {
+                    Object obj = mMap.valueAt(i);
                     if (obj instanceof Parcelable) {
                         if ((((Parcelable)obj).describeContents()
                                 & Parcelable.CONTENTS_FILE_DESCRIPTOR) != 0) {
@@ -541,6 +568,13 @@ public final class Bundle implements Parcelable, Cloneable {
      */
     public void putParcelableArrayList(String key,
         ArrayList<? extends Parcelable> value) {
+        unparcel();
+        mMap.put(key, value);
+        mFdsKnown = false;
+    }
+
+    /** {@hide} */
+    public void putParcelableList(String key, List<? extends Parcelable> value) {
         unparcel();
         mMap.put(key, value);
         mFdsKnown = false;
@@ -785,6 +819,8 @@ public final class Bundle implements Parcelable, Cloneable {
      */
     public boolean getBoolean(String key) {
         unparcel();
+        if (DEBUG) Log.d(TAG, "Getting boolean in "
+                + Integer.toHexString(System.identityHashCode(this)));
         return getBoolean(key, false);
     }
 
@@ -801,8 +837,8 @@ public final class Bundle implements Parcelable, Cloneable {
         sb.append(".  The default value ");
         sb.append(defaultValue);
         sb.append(" was returned.");
-        Log.w(LOG_TAG, sb.toString());
-        Log.w(LOG_TAG, "Attempt to cast generated internal exception:", e);
+        Log.w(TAG, sb.toString());
+        Log.w(TAG, "Attempt to cast generated internal exception:", e);
     }
 
     private void typeWarning(String key, Object value, String className,
@@ -1634,23 +1670,33 @@ public final class Bundle implements Parcelable, Cloneable {
         final boolean oldAllowFds = parcel.pushAllowFds(mAllowFds);
         try {
             if (mParcelledData != null) {
-                int length = mParcelledData.dataSize();
-                parcel.writeInt(length);
-                parcel.writeInt(0x4C444E42); // 'B' 'N' 'D' 'L'
-                parcel.appendFrom(mParcelledData, 0, length);
+                if (mParcelledData == EMPTY_PARCEL) {
+                    parcel.writeInt(0);
+                } else {
+                    int length = mParcelledData.dataSize();
+                    parcel.writeInt(length);
+                    parcel.writeInt(BUNDLE_MAGIC);
+                    parcel.appendFrom(mParcelledData, 0, length);
+                }
             } else {
+                // Special case for empty bundles.
+                if (mMap == null || mMap.size() <= 0) {
+                    parcel.writeInt(0);
+                    return;
+                }
+                int lengthPos = parcel.dataPosition();
                 parcel.writeInt(-1); // dummy, will hold length
-                parcel.writeInt(0x4C444E42); // 'B' 'N' 'D' 'L'
+                parcel.writeInt(BUNDLE_MAGIC);
     
-                int oldPos = parcel.dataPosition();
-                parcel.writeMapInternal(mMap);
-                int newPos = parcel.dataPosition();
+                int startPos = parcel.dataPosition();
+                parcel.writeArrayMapInternal(mMap);
+                int endPos = parcel.dataPosition();
     
                 // Backpatch length
-                parcel.setDataPosition(oldPos - 8);
-                int length = newPos - oldPos;
+                parcel.setDataPosition(lengthPos);
+                int length = endPos - startPos;
                 parcel.writeInt(length);
-                parcel.setDataPosition(newPos);
+                parcel.setDataPosition(endPos);
             }
         } finally {
             parcel.restoreAllowFds(oldAllowFds);
@@ -1671,12 +1717,18 @@ public final class Bundle implements Parcelable, Cloneable {
     }
 
     void readFromParcelInner(Parcel parcel, int length) {
+        if (length == 0) {
+            // Empty Bundle or end of data.
+            mParcelledData = EMPTY_PARCEL;
+            mHasFds = false;
+            mFdsKnown = true;
+            return;
+        }
         int magic = parcel.readInt();
-        if (magic != 0x4C444E42) {
+        if (magic != BUNDLE_MAGIC) {
             //noinspection ThrowableInstanceNeverThrown
-            String st = Log.getStackTraceString(new RuntimeException());
-            Log.e("Bundle", "readBundle: bad magic number");
-            Log.e("Bundle", "readBundle: trace = " + st);
+            throw new IllegalStateException("Bad magic number for Bundle: 0x"
+                    + Integer.toHexString(magic));
         }
 
         // Advance within this Parcel
@@ -1686,8 +1738,10 @@ public final class Bundle implements Parcelable, Cloneable {
         Parcel p = Parcel.obtain();
         p.setDataPosition(0);
         p.appendFrom(parcel, offset, length);
+        if (DEBUG) Log.d(TAG, "Retrieving "  + Integer.toHexString(System.identityHashCode(this))
+                + ": " + length + " bundle bytes starting at " + offset);
         p.setDataPosition(0);
-        
+
         mParcelledData = p;
         mHasFds = p.hasFileDescriptors();
         mFdsKnown = true;
@@ -1696,8 +1750,12 @@ public final class Bundle implements Parcelable, Cloneable {
     @Override
     public synchronized String toString() {
         if (mParcelledData != null) {
-            return "Bundle[mParcelledData.dataSize=" +
-                    mParcelledData.dataSize() + "]";
+            if (mParcelledData == EMPTY_PARCEL) {
+                return "Bundle[EMPTY_PARCEL]";
+            } else {
+                return "Bundle[mParcelledData.dataSize=" +
+                        mParcelledData.dataSize() + "]";
+            }
         }
         return "Bundle[" + mMap.toString() + "]";
     }

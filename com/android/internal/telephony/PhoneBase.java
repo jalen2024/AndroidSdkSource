@@ -30,11 +30,13 @@ import android.os.RegistrantList;
 import android.os.SystemProperties;
 import android.preference.PreferenceManager;
 import android.provider.Settings;
+import android.telephony.CellIdentityCdma;
 import android.telephony.CellInfo;
+import android.telephony.CellInfoCdma;
+import android.telephony.Rlog;
 import android.telephony.ServiceState;
 import android.telephony.SignalStrength;
 import android.text.TextUtils;
-import android.telephony.Rlog;
 
 import com.android.internal.R;
 import com.android.internal.telephony.dataconnection.DcTrackerBase;
@@ -46,8 +48,10 @@ import com.android.internal.telephony.uicc.IsimRecords;
 import com.android.internal.telephony.uicc.UiccCardApplication;
 import com.android.internal.telephony.uicc.UiccController;
 import com.android.internal.telephony.uicc.UsimServiceTable;
+
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -111,9 +115,8 @@ public abstract class PhoneBase extends Handler implements Phone {
     protected static final int EVENT_CDMA_SUBSCRIPTION_SOURCE_CHANGED = 27;
     // other
     protected static final int EVENT_SET_NETWORK_AUTOMATIC          = 28;
-    protected static final int EVENT_NEW_ICC_SMS                    = 29;
-    protected static final int EVENT_ICC_RECORD_EVENTS              = 30;
-    protected static final int EVENT_ICC_CHANGED                    = 31;
+    protected static final int EVENT_ICC_RECORD_EVENTS              = 29;
+    protected static final int EVENT_ICC_CHANGED                    = 30;
 
     // Key used to read/write current CLIR setting
     public static final String CLIR_KEY = "clir_key";
@@ -136,7 +139,6 @@ public abstract class PhoneBase extends Handler implements Phone {
     public SmsUsageMonitor mSmsUsageMonitor;
     protected AtomicReference<UiccCardApplication> mUiccApplication =
             new AtomicReference<UiccCardApplication>();
-    public SMSDispatcher mSMS;
 
     private TelephonyTester mTelephonyTester;
     private final String mName;
@@ -323,7 +325,6 @@ public abstract class PhoneBase extends Handler implements Phone {
     public void removeReferences() {
         mSmsStorageMonitor = null;
         mSmsUsageMonitor = null;
-        mSMS = null;
         mIccRecords.set(null);
         mUiccApplication.set(null);
         mDcTracker = null;
@@ -341,6 +342,11 @@ public abstract class PhoneBase extends Handler implements Phone {
     public void handleMessage(Message msg) {
         AsyncResult ar;
 
+        if (!mIsTheCurrentActivePhone) {
+            Rlog.e(LOG_TAG, "Received message " + msg +
+                    "[" + msg.what + "] while being destroyed. Ignoring.");
+            return;
+        }
         switch(msg.what) {
             case EVENT_CALL_RING:
                 Rlog.d(LOG_TAG, "Event EVENT_CALL_RING Received state=" + getState());
@@ -743,6 +749,12 @@ public abstract class PhoneBase extends Handler implements Phone {
         return this;
     }
 
+    @Override
+    public void updatePhoneObject(int voiceRadioTech) {
+        // Only the PhoneProxy can update the phone object.
+        PhoneFactory.getDefaultPhone().updatePhoneObject(voiceRadioTech);
+    }
+
     /**
     * Retrieves the ServiceStateTracker of the phone instance.
     */
@@ -788,7 +800,40 @@ public abstract class PhoneBase extends Handler implements Phone {
      */
     @Override
     public List<CellInfo> getAllCellInfo() {
-        return getServiceStateTracker().getAllCellInfo();
+        List<CellInfo> cellInfoList = getServiceStateTracker().getAllCellInfo();
+        return privatizeCellInfoList(cellInfoList);
+    }
+
+    /**
+     * Clear CDMA base station lat/long values if location setting is disabled.
+     * @param cellInfoList the original cell info list from the RIL
+     * @return the original list with CDMA lat/long cleared if necessary
+     */
+    private List<CellInfo> privatizeCellInfoList(List<CellInfo> cellInfoList) {
+        int mode = Settings.Secure.getInt(getContext().getContentResolver(),
+                Settings.Secure.LOCATION_MODE, Settings.Secure.LOCATION_MODE_OFF);
+        if (mode == Settings.Secure.LOCATION_MODE_OFF) {
+            ArrayList<CellInfo> privateCellInfoList = new ArrayList<CellInfo>(cellInfoList.size());
+            // clear lat/lon values for location privacy
+            for (CellInfo c : cellInfoList) {
+                if (c instanceof CellInfoCdma) {
+                    CellInfoCdma cellInfoCdma = (CellInfoCdma) c;
+                    CellIdentityCdma cellIdentity = cellInfoCdma.getCellIdentity();
+                    CellIdentityCdma maskedCellIdentity = new CellIdentityCdma(
+                            cellIdentity.getNetworkId(),
+                            cellIdentity.getSystemId(),
+                            cellIdentity.getBasestationId(),
+                            Integer.MAX_VALUE, Integer.MAX_VALUE);
+                    CellInfoCdma privateCellInfoCdma = new CellInfoCdma(cellInfoCdma);
+                    privateCellInfoCdma.setCellIdentity(maskedCellIdentity);
+                    privateCellInfoList.add(privateCellInfoCdma);
+                } else {
+                    privateCellInfoList.add(c);
+                }
+            }
+            cellInfoList = privateCellInfoList;
+        }
+        return cellInfoList;
     }
 
     /**
@@ -952,7 +997,7 @@ public abstract class PhoneBase extends Handler implements Phone {
     }
 
     public void notifyCellInfo(List<CellInfo> cellInfo) {
-        mNotifier.notifyCellInfo(this, cellInfo);
+        mNotifier.notifyCellInfo(this, privatizeCellInfoList(cellInfo));
     }
 
     /**
@@ -1376,7 +1421,6 @@ public abstract class PhoneBase extends Handler implements Phone {
         pw.println(" mUiccApplication=" + mUiccApplication.get());
         pw.println(" mSmsStorageMonitor=" + mSmsStorageMonitor);
         pw.println(" mSmsUsageMonitor=" + mSmsUsageMonitor);
-        pw.println(" mSMS=" + mSMS);
         pw.flush();
         pw.println(" mLooper=" + mLooper);
         pw.println(" mContext=" + mContext);

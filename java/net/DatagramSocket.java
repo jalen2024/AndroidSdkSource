@@ -17,10 +17,12 @@
 
 package java.net;
 
+import java.io.Closeable;
 import java.io.FileDescriptor;
 import java.io.IOException;
 import java.nio.channels.DatagramChannel;
 import libcore.io.ErrnoException;
+import libcore.io.IoBridge;
 import libcore.io.Libcore;
 import static libcore.io.OsConstants.*;
 
@@ -32,7 +34,7 @@ import static libcore.io.OsConstants.*;
  * @see DatagramPacket
  * @see DatagramSocketImplFactory
  */
-public class DatagramSocket {
+public class DatagramSocket implements Closeable {
 
     DatagramSocketImpl impl;
 
@@ -150,20 +152,15 @@ public class DatagramSocket {
     }
 
     /**
-     * Gets the {@code InetAddress} instance representing the bound local
-     * address of this UDP datagram socket.
-     *
-     * @return the local address to which this socket is bound to or {@code
-     *         null} if this socket is closed.
+     * Returns the local address to which this socket is bound,
+     * or {@code null} if this socket is closed.
      */
     public InetAddress getLocalAddress() {
-        if (isClosed()) {
+        try {
+            return IoBridge.getSocketLocalAddress(impl.fd);
+        } catch (SocketException ex) {
             return null;
         }
-        if (!isBound()) {
-            return Inet4Address.ANY;
-        }
-        return impl.getLocalAddress();
     }
 
     /**

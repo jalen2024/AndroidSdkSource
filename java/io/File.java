@@ -27,7 +27,7 @@ import libcore.io.ErrnoException;
 import libcore.io.IoUtils;
 import libcore.io.Libcore;
 import libcore.io.StructStat;
-import libcore.io.StructStatFs;
+import libcore.io.StructStatVfs;
 import org.apache.harmony.luni.util.DeleteOnExit;
 import static libcore.io.OsConstants.*;
 
@@ -487,8 +487,6 @@ public class File implements Serializable, Comparable<File> {
 
     /**
      * Returns the path of this file.
-     *
-     * @return this file's path.
      */
     public String getPath() {
         return path;
@@ -1084,8 +1082,8 @@ public class File implements Serializable, Comparable<File> {
      * @return a URL for this file.
      * @throws java.net.MalformedURLException
      *             if the path cannot be transformed into a URL.
-     * @deprecated use {@link #toURI} and {@link java.net.URI#toURL} to get
-     * correct escaping of illegal characters.
+     * @deprecated Use {@link #toURI} and {@link java.net.URI#toURL} to
+     * correctly escape illegal characters.
      */
     @Deprecated
     public URL toURL() throws java.net.MalformedURLException {
@@ -1132,7 +1130,7 @@ public class File implements Serializable, Comparable<File> {
      */
     public long getTotalSpace() {
         try {
-            StructStatFs sb = Libcore.os.statfs(path);
+            StructStatVfs sb = Libcore.os.statvfs(path);
             return sb.f_blocks * sb.f_bsize; // total block count * block size in bytes.
         } catch (ErrnoException errnoException) {
             return 0;
@@ -1154,7 +1152,7 @@ public class File implements Serializable, Comparable<File> {
      */
     public long getUsableSpace() {
         try {
-            StructStatFs sb = Libcore.os.statfs(path);
+            StructStatVfs sb = Libcore.os.statvfs(path);
             return sb.f_bavail * sb.f_bsize; // non-root free block count * block size in bytes.
         } catch (ErrnoException errnoException) {
             return 0;
@@ -1172,7 +1170,7 @@ public class File implements Serializable, Comparable<File> {
      */
     public long getFreeSpace() {
         try {
-            StructStatFs sb = Libcore.os.statfs(path);
+            StructStatVfs sb = Libcore.os.statvfs(path);
             return sb.f_bfree * sb.f_bsize; // free block count * block size in bytes.
         } catch (ErrnoException errnoException) {
             return 0;

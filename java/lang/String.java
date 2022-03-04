@@ -573,7 +573,12 @@ outer:
      * @throws IndexOutOfBoundsException
      *             if {@code index < 0} or {@code index >= length()}.
      */
-    public native char charAt(int index);
+    public char charAt(int index) {
+        if (index < 0 || index >= count) {
+            throw indexAndLength(index);
+        }
+        return value[offset + index];
+    }
 
     private StringIndexOutOfBoundsException indexAndLength(int index) {
         throw new StringIndexOutOfBoundsException(this, index);
@@ -791,7 +796,7 @@ outer:
      * @throws IndexOutOfBoundsException
      *             if {@code start < 0}, {@code end > length()}, {@code index <
      *             0} or {@code end - start > data.length - index}.
-     * @deprecated Use {@link #getBytes()} or {@link #getBytes(String)}
+     * @deprecated Use {@link #getBytes()} or {@link #getBytes(String)} instead.
      */
     @Deprecated
     public void getBytes(int start, int end, byte[] data, int index) {
@@ -1077,7 +1082,9 @@ outer:
      *
      * @since 1.6
      */
-    public native boolean isEmpty();
+    public boolean isEmpty() {
+        return count == 0;
+    }
 
     /**
      * Returns the last index of the code point {@code c}, or -1.
@@ -1197,11 +1204,11 @@ outer:
     }
 
     /**
-     * Returns the size of this string.
-     *
-     * @return the number of characters in this string.
+     * Returns the number of characters in this string.
      */
-    public native int length();
+    public int length() {
+        return count;
+    }
 
     /**
      * Compares the specified string to this string and compares the specified
@@ -1360,10 +1367,14 @@ outer:
         // The empty target matches at the start and end and between each character.
         int targetLength = targetString.length();
         if (targetLength == 0) {
-            int resultLength = (count + 2) * replacementString.length();
+            // The result contains the original 'count' characters, a copy of the
+            // replacement string before every one of those characters, and a final
+            // copy of the replacement string at the end.
+            int resultLength = count + (count + 1) * replacementString.length();
             StringBuilder result = new StringBuilder(resultLength);
             result.append(replacementString);
-            for (int i = offset; i < count; ++i) {
+            int end = offset + count;
+            for (int i = offset; i != end; ++i) {
                 result.append(value[i]);
                 result.append(replacementString);
             }
@@ -1465,9 +1476,9 @@ outer:
     }
 
     /**
-     * Copies the characters in this string to a character array.
-     *
-     * @return a character array containing the characters of this string.
+     * Returns a new {@code char} array containing a copy of the characters in this string.
+     * This is expensive and rarely useful. If you just want to iterate over the characters in
+     * the string, use {@link #charAt} instead.
      */
     public char[] toCharArray() {
         char[] buffer = new char[count];

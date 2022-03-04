@@ -20,7 +20,7 @@ package java.util.jar;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.nio.charset.Charsets;
+import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -206,7 +206,7 @@ class JarVerifier {
             if (hash == null) {
                 continue;
             }
-            byte[] hashBytes = hash.getBytes(Charsets.ISO_8859_1);
+            byte[] hashBytes = hash.getBytes(StandardCharsets.ISO_8859_1);
 
             try {
                 return new VerifierEntry(name, MessageDigest.getInstance(algorithm), hashBytes,
@@ -276,8 +276,7 @@ class JarVerifier {
      */
     private void verifyCertificate(String certFile) {
         // Found Digital Sig, .SF should already have been read
-        String signatureFile = certFile.substring(0, certFile.lastIndexOf('.'))
-                + ".SF";
+        String signatureFile = certFile.substring(0, certFile.lastIndexOf('.')) + ".SF";
         byte[] sfBytes = metaEntries.get(signatureFile);
         if (sfBytes == null) {
             return;
@@ -314,8 +313,8 @@ class JarVerifier {
         Attributes attributes = new Attributes();
         HashMap<String, Attributes> entries = new HashMap<String, Attributes>();
         try {
-            InitManifest im = new InitManifest(sfBytes, attributes);
-            im.initEntries(entries, null);
+            ManifestReader im = new ManifestReader(sfBytes, attributes);
+            im.readEntries(entries, null);
         } catch (IOException e) {
             return;
         }
@@ -343,12 +342,9 @@ class JarVerifier {
         }
 
         // Use .SF to verify the whole manifest.
-        String digestAttribute = createdBySigntool ? "-Digest"
-                : "-Digest-Manifest";
-        if (!verify(attributes, digestAttribute, manifest, 0, manifest.length,
-                false, false)) {
-            Iterator<Map.Entry<String, Attributes>> it = entries.entrySet()
-                    .iterator();
+        String digestAttribute = createdBySigntool ? "-Digest" : "-Digest-Manifest";
+        if (!verify(attributes, digestAttribute, manifest, 0, manifest.length, false, false)) {
+            Iterator<Map.Entry<String, Attributes>> it = entries.entrySet().iterator();
             while (it.hasNext()) {
                 Map.Entry<String, Attributes> entry = it.next();
                 Manifest.Chunk chunk = man.getChunk(entry.getKey());
@@ -401,14 +397,13 @@ class JarVerifier {
             } catch (NoSuchAlgorithmException e) {
                 continue;
             }
-            if (ignoreSecondEndline && data[end - 1] == '\n'
-                    && data[end - 2] == '\n') {
+            if (ignoreSecondEndline && data[end - 1] == '\n' && data[end - 2] == '\n') {
                 md.update(data, start, end - 1 - start);
             } else {
                 md.update(data, start, end - start);
             }
             byte[] b = md.digest();
-            byte[] hashBytes = hash.getBytes(Charsets.ISO_8859_1);
+            byte[] hashBytes = hash.getBytes(StandardCharsets.ISO_8859_1);
             return MessageDigest.isEqual(b, Base64.decode(hashBytes));
         }
         return ignorable;

@@ -25,8 +25,8 @@ import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.nio.charset.CharsetEncoder;
-import java.nio.charset.Charsets;
 import java.nio.charset.CoderResult;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
@@ -42,8 +42,6 @@ public class Manifest implements Cloneable {
     private static final byte[] LINE_SEPARATOR = new byte[] { '\r', '\n' };
 
     private static final byte[] VALUE_SEPARATOR = new byte[] { ':', ' ' };
-
-    private static final Attributes.Name NAME_ATTRIBUTE = new Attributes.Name("Name");
 
     private static final Field BAIS_BUF = getByteArrayInputStreamField("buf");
     private static final Field BAIS_POS = getByteArrayInputStreamField("pos");
@@ -213,9 +211,9 @@ public class Manifest implements Cloneable {
             buf[buf.length - 1] = '\n';
         }
 
-        InitManifest im = new InitManifest(buf, mainAttributes);
-        mainEnd = im.getPos();
-        im.initEntries(entries, chunks);
+        ManifestReader im = new ManifestReader(buf, mainAttributes);
+        mainEnd = im.getEndOfMainSection();
+        im.readEntries(entries, chunks);
     }
 
     /**
@@ -302,7 +300,7 @@ public class Manifest implements Cloneable {
      *             If an error occurs writing the {@code Manifest}.
      */
     static void write(Manifest manifest, OutputStream out) throws IOException {
-        CharsetEncoder encoder = Charsets.UTF_8.newEncoder();
+        CharsetEncoder encoder = StandardCharsets.UTF_8.newEncoder();
         ByteBuffer buffer = ByteBuffer.allocate(LINE_LENGTH_LIMIT);
 
         Attributes.Name versionName = Attributes.Name.MANIFEST_VERSION;
@@ -325,7 +323,7 @@ public class Manifest implements Cloneable {
         Iterator<String> i = manifest.getEntries().keySet().iterator();
         while (i.hasNext()) {
             String key = i.next();
-            writeEntry(out, NAME_ATTRIBUTE, key, encoder, buffer);
+            writeEntry(out, Attributes.Name.NAME, key, encoder, buffer);
             Attributes attributes = manifest.entries.get(key);
             Iterator<?> entries = attributes.keySet().iterator();
             while (entries.hasNext()) {
@@ -339,7 +337,7 @@ public class Manifest implements Cloneable {
     private static void writeEntry(OutputStream os, Attributes.Name name,
             String value, CharsetEncoder encoder, ByteBuffer bBuf) throws IOException {
         String nameString = name.getName();
-        os.write(nameString.getBytes(Charsets.US_ASCII));
+        os.write(nameString.getBytes(StandardCharsets.US_ASCII));
         os.write(VALUE_SEPARATOR);
 
         encoder.reset();

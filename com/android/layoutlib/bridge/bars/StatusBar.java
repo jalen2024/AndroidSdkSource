@@ -30,7 +30,10 @@ import android.widget.TextView;
 
 public class StatusBar extends CustomBar {
 
-    public StatusBar(Context context, Density density) throws XmlPullParserException {
+    public StatusBar(Context context, Density density, int direction, boolean RtlEnabled)
+            throws XmlPullParserException {
+        // FIXME: if direction is RTL but it's not enabled in application manifest, mirror this bar.
+
         super(context, density, LinearLayout.HORIZONTAL, "/bars/status_bar.xml", "status_bar.xml");
 
         // FIXME: use FILL_H?
@@ -42,10 +45,7 @@ public class StatusBar extends CustomBar {
         // We do know the order though.
         // 0 is the spacer
         loadIcon(1, "stat_sys_wifi_signal_4_fully.png", density);
-        Drawable drawable = loadIcon(2, ResourceType.DRAWABLE, "stat_sys_battery_charge");
-        if (drawable instanceof LevelListDrawable) {
-            ((LevelListDrawable) drawable).setLevel(100);
-        }
+        loadIcon(2, "stat_sys_battery_charge_anim100.png", density);
     }
 
     @Override

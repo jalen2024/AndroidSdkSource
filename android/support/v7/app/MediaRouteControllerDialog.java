@@ -28,7 +28,6 @@ import android.view.View;
 import android.view.Window;
 import android.widget.Button;
 import android.widget.FrameLayout;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 
@@ -44,14 +43,21 @@ import android.widget.SeekBar;
 public class MediaRouteControllerDialog extends Dialog {
     private static final String TAG = "MediaRouteControllerDialog";
 
+    // Time to wait before updating the volume when the user lets go of the seek bar
+    // to allow the route provider time to propagate the change and publish a new
+    // route descriptor.
+    private static final int VOLUME_UPDATE_DELAY_MILLIS = 250;
+
     private final MediaRouter mRouter;
     private final MediaRouterCallback mCallback;
     private final MediaRouter.RouteInfo mRoute;
 
+    private boolean mCreated;
     private Drawable mMediaRouteConnectingDrawable;
     private Drawable mMediaRouteOnDrawable;
     private Drawable mCurrentIconDrawable;
 
+    private boolean mVolumeControlEnabled = true;
     private LinearLayout mVolumeLayout;
     private SeekBar mVolumeSlider;
     private boolean mVolumeSliderTouched;
@@ -101,6 +107,30 @@ public class MediaRouteControllerDialog extends Dialog {
         return mControlView;
     }
 
+    /**
+     * Sets whether to enable the volume slider and volume control using the volume keys
+     * when the route supports it.
+     * <p>
+     * The default value is true.
+     * </p>
+     */
+    public void setVolumeControlEnabled(boolean enable) {
+        if (mVolumeControlEnabled != enable) {
+            mVolumeControlEnabled = enable;
+            if (mCreated) {
+                updateVolume();
+            }
+        }
+    }
+
+    /**
+     * Returns whether to enable the volume slider and volume control using the volume keys
+     * when the route supports it.
+     */
+    public boolean isVolumeControlEnabled() {
+        return mVolumeControlEnabled;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -112,15 +142,31 @@ public class MediaRouteControllerDialog extends Dialog {
         mVolumeLayout = (LinearLayout)findViewById(R.id.media_route_volume_layout);
         mVolumeSlider = (SeekBar)findViewById(R.id.media_route_volume_slider);
         mVolumeSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            private final Runnable mStopTrackingTouch = new Runnable() {
+                @Override
+                public void run() {
+                    if (mVolumeSliderTouched) {
+                        mVolumeSliderTouched = false;
+                        updateVolume();
+                    }
+                }
+            };
+
             @Override
             public void onStartTrackingTouch(SeekBar seekBar) {
-                mVolumeSliderTouched = true;
+                if (mVolumeSliderTouched) {
+                    mVolumeSlider.removeCallbacks(mStopTrackingTouch);
+                } else {
+                    mVolumeSliderTouched = true;
+                }
             }
 
             @Override
             public void onStopTrackingTouch(SeekBar seekBar) {
-                mVolumeSliderTouched = false;
-                updateVolume();
+                // Defer resetting mVolumeSliderTouched to allow the media route provider
+                // a little time to settle into its new state and publish the final
+                // volume update.
+                mVolumeSlider.postDelayed(mStopTrackingTouch, VOLUME_UPDATE_DELAY_MILLIS);
             }
 
             @Override
@@ -142,16 +188,20 @@ public class MediaRouteControllerDialog extends Dialog {
             }
         });
 
+        mCreated = true;
         if (update()) {
             mControlView = onCreateMediaControlView(savedInstanceState);
+            FrameLayout controlFrame =
+                    (FrameLayout)findViewById(R.id.media_route_control_frame);
             if (mControlView != null) {
-                FrameLayout controlFrame =
-                        (FrameLayout)findViewById(R.id.media_route_control_frame);
-                controlFrame.addView(controlFrame);
+                controlFrame.addView(mControlView);
                 controlFrame.setVisibility(View.VISIBLE);
+            } else {
+                controlFrame.setVisibility(View.GONE);
             }
         }
     }
+
 
     @Override
     public void onAttachedToWindow() {
@@ -171,25 +221,19 @@ public class MediaRouteControllerDialog extends Dialog {
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (mRoute.getVolumeHandling() == MediaRouter.RouteInfo.PLAYBACK_VOLUME_VARIABLE) {
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
-                mRoute.requestUpdateVolume(-1);
-                return true;
-            } else if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                mRoute.requestUpdateVolume(1);
-                return true;
-            }
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+                || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            mRoute.requestUpdateVolume(keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ? -1 : 1);
+            return true;
         }
         return super.onKeyDown(keyCode, event);
     }
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (mRoute.getVolumeHandling() == MediaRouter.RouteInfo.PLAYBACK_VOLUME_VARIABLE) {
-            if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
-                    || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-                return true;
-            }
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
+                || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            return true;
         }
         return super.onKeyUp(keyCode, event);
     }
@@ -207,8 +251,8 @@ public class MediaRouteControllerDialog extends Dialog {
         if (icon != mCurrentIconDrawable) {
             mCurrentIconDrawable = icon;
 
-            // There seems to be a bug in the framework where feature drawables
-            // will not start animating unless they experience a transition from
+            // Prior to KLP MR1 there was a bug in ImageView that caused feature drawables
+            // to not start animating unless they experienced a transition from
             // invisible to visible.  So we force the drawable to be invisible here.
             // The window will make the drawable visible when attached.
             icon.setVisible(false, true);
@@ -235,7 +279,7 @@ public class MediaRouteControllerDialog extends Dialog {
 
     private void updateVolume() {
         if (!mVolumeSliderTouched) {
-            if (mRoute.getVolumeHandling() == MediaRouter.RouteInfo.PLAYBACK_VOLUME_VARIABLE) {
+            if (isVolumeControlAvailable()) {
                 mVolumeLayout.setVisibility(View.VISIBLE);
                 mVolumeSlider.setMax(mRoute.getVolumeMax());
                 mVolumeSlider.setProgress(mRoute.getVolume());
@@ -243,6 +287,11 @@ public class MediaRouteControllerDialog extends Dialog {
                 mVolumeLayout.setVisibility(View.GONE);
             }
         }
+    }
+
+    private boolean isVolumeControlAvailable() {
+        return mVolumeControlEnabled && mRoute.getVolumeHandling() ==
+                MediaRouter.RouteInfo.PLAYBACK_VOLUME_VARIABLE;
     }
 
     private final class MediaRouterCallback extends MediaRouter.Callback {

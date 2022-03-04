@@ -104,8 +104,8 @@ import java.io.Serializable;
  * prefixed by {@code Is}. For example {@code \p{IsLu}} for all uppercase letters.
  * <li>POSIX class names. These are 'Alnum', 'Alpha', 'ASCII', 'Blank', 'Cntrl', 'Digit',
  * 'Graph', 'Lower', 'Print', 'Punct', 'Upper', 'XDigit'.
- * <li>Unicode block names, as used by {@link java.lang.Character.UnicodeBlock#forName} prefixed
- * by {@code In}. For example {@code \p{InHebrew}} for all characters in the Hebrew block.
+ * <li>Unicode block names, as accepted as input to {@link java.lang.Character.UnicodeBlock#forName},
+ * prefixed by {@code In}. For example {@code \p{InHebrew}} for all characters in the Hebrew block.
  * <li>Character method names. These are all non-deprecated methods from {@link java.lang.Character}
  * whose name starts with {@code is}, but with the {@code is} replaced by {@code java}.
  * For example, {@code \p{javaLowerCase}}.
@@ -384,6 +384,10 @@ public final class Pattern implements Serializable {
     private Pattern(String pattern, int flags) throws PatternSyntaxException {
         if ((flags & CANON_EQ) != 0) {
             throw new UnsupportedOperationException("CANON_EQ flag not supported");
+        }
+        int supportedFlags = CASE_INSENSITIVE | COMMENTS | DOTALL | LITERAL | MULTILINE | UNICODE_CASE | UNIX_LINES;
+        if ((flags & ~supportedFlags) != 0) {
+            throw new IllegalArgumentException("Unsupported flags: " + (flags & ~supportedFlags));
         }
         this.pattern = pattern;
         this.flags = flags;

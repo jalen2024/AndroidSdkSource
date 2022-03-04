@@ -16,14 +16,16 @@
 
 package com.android.internal.telephony;
 
+import android.content.ComponentName;
 import android.content.Context;
 import android.net.LocalServerSocket;
 import android.os.Looper;
 import android.provider.Settings;
-import android.telephony.TelephonyManager;
 import android.telephony.Rlog;
-import com.android.internal.telephony.cdma.CDMAPhone;
+import android.telephony.TelephonyManager;
+
 import com.android.internal.telephony.cdma.CDMALTEPhone;
+import com.android.internal.telephony.cdma.CDMAPhone;
 import com.android.internal.telephony.cdma.CdmaSubscriptionSourceManager;
 import com.android.internal.telephony.gsm.GSMPhone;
 import com.android.internal.telephony.sip.SipPhone;
@@ -47,9 +49,6 @@ public class PhoneFactory {
     static private PhoneNotifier sPhoneNotifier;
     static private Looper sLooper;
     static private Context sContext;
-
-    static final int sPreferredCdmaSubscription =
-                         CdmaSubscriptionSourceManager.PREFERRED_CDMA_SUBSCRIPTION;
 
     //***** Class Methods
 
@@ -108,30 +107,7 @@ public class PhoneFactory {
                         Settings.Global.PREFERRED_NETWORK_MODE, preferredNetworkMode);
                 Rlog.i(LOG_TAG, "Network Mode set to " + Integer.toString(networkMode));
 
-                // Get cdmaSubscription
-                // TODO: Change when the ril will provides a way to know at runtime
-                //       the configuration, bug 4202572. And the ril issues the
-                //       RIL_UNSOL_CDMA_SUBSCRIPTION_SOURCE_CHANGED, bug 4295439.
-                int cdmaSubscription;
-                int lteOnCdma = TelephonyManager.getLteOnCdmaModeStatic();
-                switch (lteOnCdma) {
-                    case PhoneConstants.LTE_ON_CDMA_FALSE:
-                        cdmaSubscription = CdmaSubscriptionSourceManager.SUBSCRIPTION_FROM_NV;
-                        Rlog.i(LOG_TAG, "lteOnCdma is 0 use SUBSCRIPTION_FROM_NV");
-                        break;
-                    case PhoneConstants.LTE_ON_CDMA_TRUE:
-                        cdmaSubscription = CdmaSubscriptionSourceManager.SUBSCRIPTION_FROM_RUIM;
-                        Rlog.i(LOG_TAG, "lteOnCdma is 1 use SUBSCRIPTION_FROM_RUIM");
-                        break;
-                    case PhoneConstants.LTE_ON_CDMA_UNKNOWN:
-                    default:
-                        //Get cdmaSubscription mode from Settings.System
-                        cdmaSubscription = Settings.Global.getInt(context.getContentResolver(),
-                                Settings.Global.PREFERRED_CDMA_SUBSCRIPTION,
-                                sPreferredCdmaSubscription);
-                        Rlog.i(LOG_TAG, "lteOnCdma not set, using PREFERRED_CDMA_SUBSCRIPTION");
-                        break;
-                }
+                int cdmaSubscription = CdmaSubscriptionSourceManager.getDefault(context);
                 Rlog.i(LOG_TAG, "Cdma Subscription set to " + cdmaSubscription);
 
                 //reads the system properties and makes commandsinterface
@@ -160,6 +136,19 @@ public class PhoneFactory {
                             break;
                     }
                 }
+
+                // Ensure that we have a default SMS app. Requesting the app with
+                // updateIfNeeded set to true is enough to configure a default SMS app.
+                ComponentName componentName =
+                        SmsApplication.getDefaultSmsApplication(context, true /* updateIfNeeded */);
+                String packageName = "NONE";
+                if (componentName != null) {
+                    packageName = componentName.getPackageName();
+                }
+                Rlog.i(LOG_TAG, "defaultSmsApplication: " + packageName);
+
+                // Set up monitor to watch for changes to SMS packages
+                SmsApplication.initSmsPackageMonitor(context);
 
                 sMadeDefaults = true;
             }

@@ -25,9 +25,9 @@ import java.io.PrintWriter;
 /**
  * Description of a single binding to a service.
  */
-class ConnectionRecord {
+final class ConnectionRecord {
     final AppBindRecord binding;    // The application/service binding.
-    final ActivityRecord activity;   // If non-null, the owning activity.
+    final ActivityRecord activity;  // If non-null, the owning activity.
     final IServiceConnection conn;  // The client connection.
     final int flags;                // Binding options.
     final int clientLabel;          // String resource labeling this client.
@@ -89,11 +89,14 @@ class ConnectionRecord {
         if ((flags&Context.BIND_ADJUST_WITH_ACTIVITY) != 0) {
             sb.append("ACT ");
         }
-        if ((flags&Context.BIND_NOT_VISIBLE) != 0) {
-            sb.append("!VIS ");
-        }
         if ((flags&Context.BIND_VISIBLE) != 0) {
             sb.append("VIS ");
+        }
+        if ((flags&Context.BIND_SHOWING_UI) != 0) {
+            sb.append("UI ");
+        }
+        if ((flags&Context.BIND_NOT_VISIBLE) != 0) {
+            sb.append("!VIS ");
         }
         if (serviceDead) {
             sb.append("DEAD ");

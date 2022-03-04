@@ -218,13 +218,12 @@ public abstract class ClassLoader {
      *             if {@code offset < 0}, {@code length < 0} or if
      *             {@code offset + length} is greater than the length of
      *             {@code classRep}.
-     * @deprecated Use {@link #defineClass(String, byte[], int, int)}
+     * @deprecated Use {@link #defineClass(String, byte[], int, int)} instead.
      */
     @Deprecated
     protected final Class<?> defineClass(byte[] classRep, int offset, int length)
             throws ClassFormatError {
-
-        return VMClassLoader.defineClass(this, classRep, offset, length);
+        throw new UnsupportedOperationException("can't load this type of class file");
     }
 
     /**
@@ -251,9 +250,7 @@ public abstract class ClassLoader {
      */
     protected final Class<?> defineClass(String className, byte[] classRep, int offset, int length)
             throws ClassFormatError {
-
-        // TODO Define a default ProtectionDomain on first use
-        return defineClass(className, classRep, offset, length, null);
+        throw new UnsupportedOperationException("can't load this type of class file");
     }
 
     /**
@@ -288,8 +285,7 @@ public abstract class ClassLoader {
      */
     protected final Class<?> defineClass(String className, byte[] classRep, int offset, int length,
             ProtectionDomain protectionDomain) throws java.lang.ClassFormatError {
-
-        return VMClassLoader.defineClass(this, className, classRep, offset, length);
+        throw new UnsupportedOperationException("can't load this type of class file");
     }
 
     /**

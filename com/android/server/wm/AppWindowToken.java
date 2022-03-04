@@ -30,6 +30,10 @@ import android.view.View;
 import android.view.WindowManager;
 
 import java.io.PrintWriter;
+import java.util.ArrayList;
+
+class AppTokenList extends ArrayList<AppWindowToken> {
+}
 
 /**
  * Version of WindowToken that is specifically for a particular application (or
@@ -49,6 +53,7 @@ class AppWindowToken extends WindowToken {
     int groupId = -1;
     boolean appFullscreen;
     int requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+    boolean layoutConfigChanges;
     boolean showWhenLocked;
 
     // The input dispatching timeout for this application token in nanoseconds.

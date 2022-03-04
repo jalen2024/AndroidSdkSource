@@ -20,7 +20,8 @@ package java.util.zip;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteOrder;
-import java.nio.charset.Charsets;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.GregorianCalendar;
@@ -184,7 +185,7 @@ public class ZipEntry implements ZipConstants, Cloneable {
             return;
         }
 
-        byte[] commentBytes = comment.getBytes(Charsets.UTF_8);
+        byte[] commentBytes = comment.getBytes(StandardCharsets.UTF_8);
         if (commentBytes.length > 0xffff) {
             throw new IllegalArgumentException("Comment too long: " + commentBytes.length);
         }
@@ -342,19 +343,21 @@ public class ZipEntry implements ZipConstants, Cloneable {
 
     /*
      * Internal constructor.  Creates a new ZipEntry by reading the
-     * Central Directory Entry from "in", which must be positioned at
-     * the CDE signature.
+     * Central Directory Entry (CDE) from "in", which must be positioned
+     * at the CDE signature.
      *
-     * On exit, "in" will be positioned at the start of the next entry.
+     * On exit, "in" will be positioned at the start of the next entry
+     * in the Central Directory.
      */
-    ZipEntry(byte[] hdrBuf, InputStream in) throws IOException {
-        Streams.readFully(in, hdrBuf, 0, hdrBuf.length);
+    ZipEntry(byte[] cdeHdrBuf, InputStream cdStream) throws IOException {
+        Streams.readFully(cdStream, cdeHdrBuf, 0, cdeHdrBuf.length);
 
-        BufferIterator it = HeapBufferIterator.iterator(hdrBuf, 0, hdrBuf.length, ByteOrder.LITTLE_ENDIAN);
+        BufferIterator it = HeapBufferIterator.iterator(cdeHdrBuf, 0, cdeHdrBuf.length,
+                ByteOrder.LITTLE_ENDIAN);
 
         int sig = it.readInt();
         if (sig != CENSIG) {
-             throw new ZipException("Central Directory Entry not found");
+            ZipFile.throwZipException("Central Directory Entry", sig);
         }
 
         it.seek(8);
@@ -382,20 +385,32 @@ public class ZipEntry implements ZipConstants, Cloneable {
         localHeaderRelOffset = ((long) it.readInt()) & 0xffffffffL;
 
         byte[] nameBytes = new byte[nameLength];
-        Streams.readFully(in, nameBytes, 0, nameBytes.length);
-        name = new String(nameBytes, 0, nameBytes.length, Charsets.UTF_8);
+        Streams.readFully(cdStream, nameBytes, 0, nameBytes.length);
+        if (containsNulByte(nameBytes)) {
+            throw new ZipException("Filename contains NUL byte: " + Arrays.toString(nameBytes));
+        }
+        name = new String(nameBytes, 0, nameBytes.length, StandardCharsets.UTF_8);
+
+        if (extraLength > 0) {
+            extra = new byte[extraLength];
+            Streams.readFully(cdStream, extra, 0, extraLength);
+        }
 
         // The RI has always assumed UTF-8. (If GPBF_UTF8_FLAG isn't set, the encoding is
         // actually IBM-437.)
         if (commentByteCount > 0) {
             byte[] commentBytes = new byte[commentByteCount];
-            Streams.readFully(in, commentBytes, 0, commentByteCount);
-            comment = new String(commentBytes, 0, commentBytes.length, Charsets.UTF_8);
+            Streams.readFully(cdStream, commentBytes, 0, commentByteCount);
+            comment = new String(commentBytes, 0, commentBytes.length, StandardCharsets.UTF_8);
         }
+    }
 
-        if (extraLength > 0) {
-            extra = new byte[extraLength];
-            Streams.readFully(in, extra, 0, extraLength);
+    private static boolean containsNulByte(byte[] bytes) {
+        for (byte b : bytes) {
+            if (b == 0) {
+                return true;
+            }
         }
+        return false;
     }
 }

@@ -17,6 +17,7 @@
 package android.support.v7.media;
 
 import android.content.BroadcastReceiver;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -43,7 +44,8 @@ abstract class SystemMediaRouteProvider extends MediaRouteProvider {
     public static final String DEFAULT_ROUTE_ID = "DEFAULT_ROUTE";
 
     protected SystemMediaRouteProvider(Context context) {
-        super(context, new ProviderMetadata(PACKAGE_NAME));
+        super(context, new ProviderMetadata(new ComponentName(PACKAGE_NAME,
+                SystemMediaRouteProvider.class.getName())));
     }
 
     public static SystemMediaRouteProvider obtain(Context context, SyncCallback syncCallback) {
@@ -255,6 +257,16 @@ abstract class SystemMediaRouteProvider extends MediaRouteProvider {
                     mRouterObj, r.getString(R.string.mr_user_route_category_name), false);
 
             updateSystemRoutes();
+        }
+
+        @Override
+        public RouteController onCreateRouteController(String routeId) {
+            int index = findSystemRouteRecordByDescriptorId(routeId);
+            if (index >= 0) {
+                SystemRouteRecord record = mSystemRouteRecords.get(index);
+                return new SystemRouteController(record.mRouteObj);
+            }
+            return null;
         }
 
         @Override
@@ -670,6 +682,24 @@ abstract class SystemMediaRouteProvider extends MediaRouteProvider {
             public UserRouteRecord(MediaRouter.RouteInfo route, Object routeObj) {
                 mRoute = route;
                 mRouteObj = routeObj;
+            }
+        }
+
+        protected final class SystemRouteController extends RouteController {
+            private final Object mRouteObj;
+
+            public SystemRouteController(Object routeObj) {
+                mRouteObj = routeObj;
+            }
+
+            @Override
+            public void onSetVolume(int volume) {
+                MediaRouterJellybean.RouteInfo.requestSetVolume(mRouteObj, volume);
+            }
+
+            @Override
+            public void onUpdateVolume(int delta) {
+                MediaRouterJellybean.RouteInfo.requestUpdateVolume(mRouteObj, delta);
             }
         }
     }

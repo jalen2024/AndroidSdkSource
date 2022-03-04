@@ -20,7 +20,7 @@ package java.util.zip;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
-import java.nio.charset.Charsets;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.HashSet;
 import libcore.util.EmptyArray;
@@ -69,7 +69,7 @@ public class ZipOutputStream extends DeflaterOutputStream implements ZipConstant
      */
     public static final int STORED = 0;
 
-    private static final int ZIPLocalHeaderVersionNeeded = 20;
+    private static final int ZIP_VERSION_2_0 = 20; // Zip specification version 2.0.
 
     private byte[] commentBytes = EmptyArray.BYTE;
 
@@ -158,8 +158,8 @@ public class ZipOutputStream extends DeflaterOutputStream implements ZipConstant
         // http://code.google.com/p/android/issues/detail?id=20214
         flags |= ZipFile.GPBF_UTF8_FLAG;
         writeLong(cDir, CENSIG);
-        writeShort(cDir, ZIPLocalHeaderVersionNeeded); // Version created
-        writeShort(cDir, ZIPLocalHeaderVersionNeeded); // Version to extract
+        writeShort(cDir, ZIP_VERSION_2_0); // Version this file was made by.
+        writeShort(cDir, ZIP_VERSION_2_0); // Minimum version needed to extract.
         writeShort(cDir, flags);
         writeShort(cDir, currentEntry.getMethod());
         writeShort(cDir, currentEntry.time);
@@ -182,7 +182,7 @@ public class ZipOutputStream extends DeflaterOutputStream implements ZipConstant
         String comment = currentEntry.getComment();
         byte[] commentBytes = EmptyArray.BYTE;
         if (comment != null) {
-            commentBytes = comment.getBytes(Charsets.UTF_8);
+            commentBytes = comment.getBytes(StandardCharsets.UTF_8);
         }
         writeShort(cDir, commentBytes.length); // Comment length.
         writeShort(cDir, 0); // Disk Start
@@ -294,7 +294,7 @@ public class ZipOutputStream extends DeflaterOutputStream implements ZipConstant
             // TODO: support Zip64.
             throw new ZipException("Too many entries for the zip file format's 16-bit entry count");
         }
-        nameBytes = ze.name.getBytes(Charsets.UTF_8);
+        nameBytes = ze.name.getBytes(StandardCharsets.UTF_8);
         nameLength = nameBytes.length;
         if (nameLength > 0xffff) {
             throw new IllegalArgumentException("Name too long: " + nameLength + " UTF-8 bytes");
@@ -313,7 +313,7 @@ public class ZipOutputStream extends DeflaterOutputStream implements ZipConstant
         // modified UTF-8. From Java 7, it sets this flag and uses normal UTF-8.)
         flags |= ZipFile.GPBF_UTF8_FLAG;
         writeLong(out, LOCSIG); // Entry header
-        writeShort(out, ZIPLocalHeaderVersionNeeded); // Extraction version
+        writeShort(out, ZIP_VERSION_2_0); // Minimum version needed to extract.
         writeShort(out, flags);
         writeShort(out, method);
         if (currentEntry.getTime() == -1) {
@@ -344,7 +344,7 @@ public class ZipOutputStream extends DeflaterOutputStream implements ZipConstant
     }
 
     /**
-     * Sets the comment associated with the file being written.
+     * Sets the comment associated with the file being written. See {@link ZipFile#getComment}.
      * @throws IllegalArgumentException if the comment is >= 64 Ki UTF-8 bytes.
      */
     public void setComment(String comment) {
@@ -353,7 +353,7 @@ public class ZipOutputStream extends DeflaterOutputStream implements ZipConstant
             return;
         }
 
-        byte[] newCommentBytes = comment.getBytes(Charsets.UTF_8);
+        byte[] newCommentBytes = comment.getBytes(StandardCharsets.UTF_8);
         if (newCommentBytes.length > 0xffff) {
             throw new IllegalArgumentException("Comment too long: " + newCommentBytes.length + " bytes");
         }

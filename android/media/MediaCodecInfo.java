@@ -16,6 +16,31 @@
 
 package android.media;
 
+/**
+ * Provides information about a given media codec available on the device. You can
+ * iterate through all codecs available by querying {@link MediaCodecList}. For example,
+ * here's how to find an encoder that supports a given MIME type:
+ * <pre>
+ * private static MediaCodecInfo selectCodec(String mimeType) {
+ *     int numCodecs = MediaCodecList.getCodecCount();
+ *     for (int i = 0; i &lt; numCodecs; i++) {
+ *         MediaCodecInfo codecInfo = MediaCodecList.getCodecInfoAt(i);
+ *
+ *         if (!codecInfo.isEncoder()) {
+ *             continue;
+ *         }
+ *
+ *         String[] types = codecInfo.getSupportedTypes();
+ *         for (int j = 0; j &lt; types.length; j++) {
+ *             if (types[j].equalsIgnoreCase(mimeType)) {
+ *                 return codecInfo;
+ *             }
+ *         }
+ *     }
+ *     return null;
+ * }</pre>
+ *
+ */
 public final class MediaCodecInfo {
     private int mIndex;
 
@@ -45,9 +70,12 @@ public final class MediaCodecInfo {
     }
 
     /**
-     * Encapsulates the capabilities of a given codec component,
-     * i.e. what profile/level combinations it supports and what colorspaces
-     * it is capable of providing the decoded data in.
+     * Encapsulates the capabilities of a given codec component.
+     * For example, what profile/level combinations it supports and what colorspaces
+     * it is capable of providing the decoded data in, as well as some
+     * codec-type specific capability flags.
+     * <p>You can get an instance for a given {@link MediaCodecInfo} object with
+     * {@link MediaCodecInfo#getCapabilitiesForType getCapabilitiesForType()}, passing a MIME type.
      */
     public static final class CodecCapabilities {
         // Enumerates supported profile/level combinations as defined
@@ -112,8 +140,32 @@ public final class MediaCodecInfo {
          * OMX_COLOR_FORMATTYPE.
          */
         public int[] colorFormats;
+
+        private final static int FLAG_SupportsAdaptivePlayback       = (1 << 0);
+        private int flags;
+
+        /**
+         * <b>video decoder only</b>: codec supports seamless resolution changes.
+         */
+        public final static String FEATURE_AdaptivePlayback       = "adaptive-playback";
+
+        /**
+         * Query codec feature capabilities.
+         */
+        public final boolean isFeatureSupported(String name) {
+            if (name.equals(FEATURE_AdaptivePlayback)) {
+                return (flags & FLAG_SupportsAdaptivePlayback) != 0;
+            }
+            return false;
+        }
     };
 
+    /**
+     * Encapsulates the profiles available for a codec component.
+     * <p>You can get a set of {@link MediaCodecInfo.CodecProfileLevel} objects for a given
+     * {@link MediaCodecInfo} object from the
+     * {@link MediaCodecInfo.CodecCapabilities#profileLevels} field.
+     */
     public static final class CodecProfileLevel {
         // from OMX_VIDEO_AVCPROFILETYPE
         public static final int AVCProfileBaseline = 0x01;
@@ -232,6 +284,7 @@ public final class MediaCodecInfo {
      * Enumerates the capabilities of the codec component. Since a single
      * component can support data of a variety of types, the type has to be
      * specified to yield a meaningful result.
+     * @param type The MIME type to query
      */
     public final CodecCapabilities getCapabilitiesForType(
             String type) {

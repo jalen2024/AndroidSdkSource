@@ -18,6 +18,7 @@ package android.widget;
 
 import com.android.internal.R;
 
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -27,13 +28,17 @@ import android.content.res.TypedArray;
 import android.database.DataSetObserver;
 import android.graphics.drawable.Drawable;
 import android.util.AttributeSet;
+import android.util.Log;
 import android.view.ActionProvider;
 import android.view.LayoutInflater;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.ViewTreeObserver.OnGlobalLayoutListener;
+import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.ActivityChooserModel.ActivityChooserModelClient;
+import android.widget.ListPopupWindow.ForwardingListener;
 
 /**
  * This class is a view for choosing an activity for handling a given {@link Intent}.
@@ -59,6 +64,8 @@ import android.widget.ActivityChooserModel.ActivityChooserModelClient;
  * @hide
  */
 public class ActivityChooserView extends ViewGroup implements ActivityChooserModelClient {
+
+    private static final String LOG_TAG = "ActivityChooserView";
 
     /**
      * An adapter for displaying the activities in an {@link AdapterView}.
@@ -227,10 +234,37 @@ public class ActivityChooserView extends ViewGroup implements ActivityChooserMod
         mDefaultActivityButton.setOnLongClickListener(mCallbacks);
         mDefaultActivityButtonImage = (ImageView) mDefaultActivityButton.findViewById(R.id.image);
 
-        mExpandActivityOverflowButton = (FrameLayout) findViewById(R.id.expand_activities_button);
-        mExpandActivityOverflowButton.setOnClickListener(mCallbacks);
+        final FrameLayout expandButton = (FrameLayout) findViewById(R.id.expand_activities_button);
+        expandButton.setOnClickListener(mCallbacks);
+        expandButton.setAccessibilityDelegate(new AccessibilityDelegate() {
+            @Override
+            public void onInitializeAccessibilityNodeInfo(View host, AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host, info);
+                info.setCanOpenPopup(true);
+            }
+        });
+        expandButton.setOnTouchListener(new ForwardingListener(expandButton) {
+            @Override
+            public ListPopupWindow getPopup() {
+                return getListPopupWindow();
+            }
+
+            @Override
+            protected boolean onForwardingStarted() {
+                showPopup();
+                return true;
+            }
+
+            @Override
+            protected boolean onForwardingStopped() {
+                dismissPopup();
+                return true;
+            }
+        });
+        mExpandActivityOverflowButton = expandButton;
+
         mExpandActivityOverflowButtonImage =
-            (ImageView) mExpandActivityOverflowButton.findViewById(R.id.image);
+            (ImageView) expandButton.findViewById(R.id.image);
         mExpandActivityOverflowButtonImage.setImageDrawable(expandActivityOverflowButtonDrawable);
 
         mAdapter = new ActivityChooserViewAdapter();
@@ -513,9 +547,9 @@ public class ActivityChooserView extends ViewGroup implements ActivityChooserMod
         }
         // Activity chooser content.
         if (mDefaultActivityButton.getVisibility() == VISIBLE) {
-            mActivityChooserContent.setBackgroundDrawable(mActivityChooserContentBackground);
+            mActivityChooserContent.setBackground(mActivityChooserContentBackground);
         } else {
-            mActivityChooserContent.setBackgroundDrawable(null);
+            mActivityChooserContent.setBackground(null);
         }
     }
 
@@ -547,7 +581,8 @@ public class ActivityChooserView extends ViewGroup implements ActivityChooserMod
                         Intent launchIntent = mAdapter.getDataModel().chooseActivity(position);
                         if (launchIntent != null) {
                             launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET);
-                            mContext.startActivity(launchIntent);
+                            ResolveInfo resolveInfo = mAdapter.getDataModel().getActivity(position);
+                            startActivity(launchIntent, resolveInfo);
                         }
                     }
                 } break;
@@ -565,7 +600,7 @@ public class ActivityChooserView extends ViewGroup implements ActivityChooserMod
                 Intent launchIntent = mAdapter.getDataModel().chooseActivity(index);
                 if (launchIntent != null) {
                     launchIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET);
-                    mContext.startActivity(launchIntent);
+                    startActivity(launchIntent, defaultActivity);
                 }
             } else if (view == mExpandActivityOverflowButton) {
                 mIsSelectingDefaultActivity = false;
@@ -600,6 +635,18 @@ public class ActivityChooserView extends ViewGroup implements ActivityChooserMod
         private void notifyOnDismissListener() {
             if (mOnDismissListener != null) {
                 mOnDismissListener.onDismiss();
+            }
+        }
+
+        private void startActivity(Intent intent, ResolveInfo resolveInfo) {
+            try {
+                mContext.startActivity(intent);
+            } catch (RuntimeException re) {
+                CharSequence appLabel = resolveInfo.loadLabel(mContext.getPackageManager());
+                String message = mContext.getString(
+                        R.string.activitychooserview_choose_application_error, appLabel);
+                Log.e(LOG_TAG, message);
+                Toast.makeText(mContext, message, Toast.LENGTH_SHORT).show();
             }
         }
     }
@@ -773,10 +820,6 @@ public class ActivityChooserView extends ViewGroup implements ActivityChooserMod
 
         public int getHistorySize() {
             return mDataModel.getHistorySize();
-        }
-
-        public int getMaxActivityCount() {
-            return mMaxActivityCount;
         }
 
         public ActivityChooserModel getDataModel() {

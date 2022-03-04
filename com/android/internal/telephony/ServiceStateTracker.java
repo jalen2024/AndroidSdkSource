@@ -21,9 +21,11 @@ import android.os.Handler;
 import android.os.Message;
 import android.os.Registrant;
 import android.os.RegistrantList;
+import android.os.SystemClock;
 import android.telephony.CellInfo;
 import android.telephony.ServiceState;
 import android.telephony.SignalStrength;
+import android.util.Pair;
 import android.util.TimeUtils;
 
 import java.io.FileDescriptor;
@@ -58,8 +60,9 @@ public abstract class ServiceStateTracker extends Handler {
     public ServiceState mSS = new ServiceState();
     protected ServiceState mNewSS = new ServiceState();
 
+    private static final long LAST_CELL_INFO_LIST_MAX_AGE_MS = 2000;
+    protected long mLastCellInfoListTime;
     protected List<CellInfo> mLastCellInfoList = null;
-    protected CellInfo mLastCellInfo = null;
 
     // This is final as subclasses alias to a more specific type
     // so we don't want the reference to change.
@@ -95,6 +98,7 @@ public abstract class ServiceStateTracker extends Handler {
     protected RegistrantList mRoamingOffRegistrants = new RegistrantList();
     protected RegistrantList mAttachedRegistrants = new RegistrantList();
     protected RegistrantList mDetachedRegistrants = new RegistrantList();
+    protected RegistrantList mDataRegStateOrRatChangedRegistrants = new RegistrantList();
     protected RegistrantList mNetworkAttachedRegistrants = new RegistrantList();
     protected RegistrantList mPsRestrictEnabledRegistrants = new RegistrantList();
     protected RegistrantList mPsRestrictDisabledRegistrants = new RegistrantList();
@@ -204,6 +208,9 @@ public abstract class ServiceStateTracker extends Handler {
         mUiccController.registerForIccChanged(this, EVENT_ICC_CHANGED, null);
         mCi.setOnSignalStrengthUpdate(this, EVENT_SIGNAL_STRENGTH_UPDATE, null);
         mCi.registerForCellInfoList(this, EVENT_UNSOL_CELL_INFO_LIST, null);
+
+        mPhoneBase.setSystemProperty(TelephonyProperties.PROPERTY_DATA_NETWORK_TYPE,
+            ServiceState.rilRadioTechnologyToString(ServiceState.RIL_RADIO_TECHNOLOGY_UNKNOWN));
     }
 
     public void dispose() {
@@ -234,6 +241,20 @@ public abstract class ServiceStateTracker extends Handler {
     }
 
     /**
+     * Notify all mDataConnectionRatChangeRegistrants using an
+     * AsyncResult in msg.obj where AsyncResult#result contains the
+     * new RAT as an Integer Object.
+     */
+    protected void notifyDataRegStateRilRadioTechnologyChanged() {
+        int rat = mSS.getRilDataRadioTechnology();
+        int drs = mSS.getDataRegState();
+        if (DBG) log("notifyDataRegStateRilRadioTechnologyChanged: drs=" + drs + " rat=" + rat);
+        mPhoneBase.setSystemProperty(TelephonyProperties.PROPERTY_DATA_NETWORK_TYPE,
+                ServiceState.rilRadioTechnologyToString(rat));
+        mDataRegStateOrRatChangedRegistrants.notifyResult(new Pair<Integer, Integer>(drs, rat));
+    }
+
+    /**
      * Some operators have been known to report registration failure
      * data only devices, to fix that use DataRegState.
      */
@@ -248,6 +269,9 @@ public abstract class ServiceStateTracker extends Handler {
         }
     }
 
+    protected void updatePhoneObject() {
+        mPhoneBase.updatePhoneObject(mSS.getRilVoiceRadioTechnology());
+    }
 
     /**
      * Registration point for combined roaming on
@@ -388,6 +412,7 @@ public abstract class ServiceStateTracker extends Handler {
                                     + " list=" + result.list);
                         }
                     }
+                    mLastCellInfoListTime = SystemClock.elapsedRealtime();
                     mLastCellInfoList = result.list;
                     result.lockObj.notify();
                 }
@@ -404,6 +429,7 @@ public abstract class ServiceStateTracker extends Handler {
                         log("EVENT_UNSOL_CELL_INFO_LIST: size=" + list.size()
                                 + " list=" + list);
                     }
+                    mLastCellInfoListTime = SystemClock.elapsedRealtime();
                     mLastCellInfoList = list;
                     mPhoneBase.notifyCellInfo(list);
                 }
@@ -461,6 +487,24 @@ public abstract class ServiceStateTracker extends Handler {
     }
     public void unregisterForDataConnectionDetached(Handler h) {
         mDetachedRegistrants.remove(h);
+    }
+
+    /**
+     * Registration for DataConnection RIL Data Radio Technology changing. The
+     * new radio technology will be returned AsyncResult#result as an Integer Object.
+     * The AsyncResult will be in the notification Message#obj.
+     *
+     * @param h handler to notify
+     * @param what what code of message when delivered
+     * @param obj placed in Message.obj
+     */
+    public void registerForDataRegStateOrRatChanged(Handler h, int what, Object obj) {
+        Registrant r = new Registrant(h, what, obj);
+        mDataRegStateOrRatChangedRegistrants.add(r);
+        notifyDataRegStateRilRadioTechnologyChanged();
+    }
+    public void unregisterForDataRegStateOrRatChanged(Handler h) {
+        mDataRegStateOrRatChangedRegistrants.remove(h);
     }
 
     /**
@@ -670,22 +714,28 @@ public abstract class ServiceStateTracker extends Handler {
         int ver = mCi.getRilVersion();
         if (ver >= 8) {
             if (isCallerOnDifferentThread()) {
-                Message msg = obtainMessage(EVENT_GET_CELL_INFO_LIST, result);
-                synchronized(result.lockObj) {
-                    mCi.getCellInfoList(msg);
-                    try {
-                        result.lockObj.wait();
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                        result.list = null;
+                if ((SystemClock.elapsedRealtime() - mLastCellInfoListTime)
+                        > LAST_CELL_INFO_LIST_MAX_AGE_MS) {
+                    Message msg = obtainMessage(EVENT_GET_CELL_INFO_LIST, result);
+                    synchronized(result.lockObj) {
+                        mCi.getCellInfoList(msg);
+                        try {
+                            result.lockObj.wait();
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                            result.list = null;
+                        }
                     }
+                } else {
+                    if (DBG) log("SST.getAllCellInfo(): return last, back to back calls");
+                    result.list = mLastCellInfoList;
                 }
             } else {
-                log("SST.getAllCellInfo(): X return last, same thread probably RadioInfo");
+                if (DBG) log("SST.getAllCellInfo(): return last, same thread can't block");
                 result.list = mLastCellInfoList;
             }
         } else {
-            log("SST.getAllCellInfo(): X not implemented");
+            if (DBG) log("SST.getAllCellInfo(): not implemented");
             result.list = null;
         }
         if (DBG) {

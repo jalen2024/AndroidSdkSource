@@ -37,9 +37,9 @@ import java.util.Arrays;
 import java.util.Comparator;
 import libcore.util.EmptyArray;
 import org.apache.harmony.kernel.vm.StringUtils;
-import org.apache.harmony.luni.lang.reflect.GenericSignatureParser;
-import org.apache.harmony.luni.lang.reflect.ListOfTypes;
-import org.apache.harmony.luni.lang.reflect.Types;
+import libcore.reflect.GenericSignatureParser;
+import libcore.reflect.ListOfTypes;
+import libcore.reflect.Types;
 
 /**
  * This class represents a method. Information about the method can be accessed,
@@ -80,6 +80,8 @@ public final class Method extends AccessibleObject implements GenericDeclaration
 
     private int slot;
 
+    private final int methodDexIndex;
+
     private Class<?> declaringClass;
 
     private String name;
@@ -110,29 +112,19 @@ public final class Method extends AccessibleObject implements GenericDeclaration
         }
     }
 
-    /**
-     * Construct a clone of the given instance.
-     *
-     * @param orig non-null; the original instance to clone
-     */
-    /*package*/ Method(Method orig) {
-        this(orig.declaringClass, orig.parameterTypes, orig.exceptionTypes,
-                orig.returnType, orig.name, orig.slot);
-
-        // Copy the accessible flag.
-        if (orig.flag) {
-            this.flag = true;
-        }
-    }
-
-    private Method(Class<?> declaring, Class<?>[] paramTypes, Class<?>[] exceptTypes, Class<?> returnType, String name, int slot)
-    {
+    private Method(Class<?> declaring, Class<?>[] paramTypes, Class<?>[] exceptTypes, Class<?> returnType, String name, int slot, int methodDexIndex) {
         this.declaringClass = declaring;
         this.name = name;
         this.slot = slot;
         this.parameterTypes = paramTypes;
         this.exceptionTypes = exceptTypes;      // may be null
         this.returnType = returnType;
+        this.methodDexIndex = methodDexIndex;
+    }
+
+    /** @hide */
+    public int getDexMethodIndex() {
+        return methodDexIndex;
     }
 
     public TypeVariable<Method>[] getTypeParameters() {
@@ -193,12 +185,10 @@ public final class Method extends AccessibleObject implements GenericDeclaration
         sb.append(".").append(getName());
         // append parameters
         sb.append('(');
-        appendArrayGenericType(sb,
-                Types.getClonedTypeArray(genericParameterTypes));
+        appendArrayGenericType(sb, Types.getTypeArray(genericParameterTypes, false));
         sb.append(')');
         // append exceptions if any
-        Type[] genericExceptionTypeArray = Types.getClonedTypeArray(
-                genericExceptionTypes);
+        Type[] genericExceptionTypeArray = Types.getTypeArray(genericExceptionTypes, false);
         if (genericExceptionTypeArray.length > 0) {
             sb.append(" throws ");
             appendArrayGenericType(sb, genericExceptionTypeArray);
@@ -223,7 +213,7 @@ public final class Method extends AccessibleObject implements GenericDeclaration
      */
     public Type[] getGenericParameterTypes() {
         initGenericTypes();
-        return Types.getClonedTypeArray(genericParameterTypes);
+        return Types.getTypeArray(genericParameterTypes, true);
     }
 
     /**
@@ -242,7 +232,7 @@ public final class Method extends AccessibleObject implements GenericDeclaration
      */
     public Type[] getGenericExceptionTypes() {
         initGenericTypes();
-        return Types.getClonedTypeArray(genericExceptionTypes);
+        return Types.getTypeArray(genericExceptionTypes, true);
     }
 
     /**

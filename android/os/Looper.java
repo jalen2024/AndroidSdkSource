@@ -59,7 +59,6 @@ public final class Looper {
 
     final MessageQueue mQueue;
     final Thread mThread;
-    volatile boolean mRun;
 
     private Printer mLogging;
 
@@ -187,7 +186,6 @@ public final class Looper {
 
     private Looper(boolean quitAllowed) {
         mQueue = new MessageQueue(quitAllowed);
-        mRun = true;
         mThread = Thread.currentThread();
     }
 
@@ -289,28 +287,23 @@ public final class Looper {
         return mQueue;
     }
 
+    /**
+     * Return whether this looper's thread is currently idle, waiting for new work
+     * to do.  This is intrinsically racy, since its state can change before you get
+     * the result back.
+     * @hide
+     */
+    public boolean isIdling() {
+        return mQueue.isIdling();
+    }
+
     public void dump(Printer pw, String prefix) {
-        pw = PrefixPrinter.create(pw, prefix);
-        pw.println(this.toString());
-        pw.println("mRun=" + mRun);
-        pw.println("mThread=" + mThread);
-        pw.println("mQueue=" + ((mQueue != null) ? mQueue : "(null"));
-        if (mQueue != null) {
-            synchronized (mQueue) {
-                long now = SystemClock.uptimeMillis();
-                Message msg = mQueue.mMessages;
-                int n = 0;
-                while (msg != null) {
-                    pw.println("  Message " + n + ": " + msg.toString(now));
-                    n++;
-                    msg = msg.next;
-                }
-                pw.println("(Total messages: " + n + ")");
-            }
-        }
+        pw.println(prefix + toString());
+        mQueue.dump(pw, prefix + "  ");
     }
 
     public String toString() {
-        return "Looper{" + Integer.toHexString(System.identityHashCode(this)) + "}";
+        return "Looper (" + mThread.getName() + ", tid " + mThread.getId()
+                + ") {" + Integer.toHexString(System.identityHashCode(this)) + "}";
     }
 }

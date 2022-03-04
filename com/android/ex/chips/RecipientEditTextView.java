@@ -17,18 +17,6 @@
 
 package com.android.ex.chips;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
 import android.app.Dialog;
 import android.content.ClipData;
 import android.content.ClipDescription;
@@ -48,6 +36,7 @@ import android.graphics.RectF;
 import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.os.AsyncTask;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
@@ -98,6 +87,18 @@ import com.android.ex.chips.RecipientAlternatesAdapter.RecipientMatchCallback;
 import com.android.ex.chips.recipientchip.DrawableRecipientChip;
 import com.android.ex.chips.recipientchip.InvisibleRecipientChip;
 import com.android.ex.chips.recipientchip.VisibleRecipientChip;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * RecipientEditTextView is an auto complete text view for use with applications
@@ -251,6 +252,8 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
 
     private int mActionBarHeight;
 
+    private boolean mAttachedToWindow;
+
     public RecipientEditTextView(Context context, AttributeSet attrs) {
         super(context, attrs);
         setChipDimensions(context, attrs);
@@ -290,6 +293,16 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
         addTextChangedListener(mTextWatcher);
         mGestureDetector = new GestureDetector(context, this);
         setOnEditorActionListener(this);
+    }
+
+    @Override
+    protected void onDetachedFromWindow() {
+        mAttachedToWindow = false;
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        mAttachedToWindow = true;
     }
 
     @Override
@@ -1419,7 +1432,7 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
         if (mCopyAddress == null && action == MotionEvent.ACTION_UP) {
             float x = event.getX();
             float y = event.getY();
-            int offset = putOffsetInRange(getOffsetForPosition(x, y));
+            int offset = putOffsetInRange(x, y);
             DrawableRecipientChip currentChip = findChip(offset);
             if (currentChip != null) {
                 if (action == MotionEvent.ACTION_UP) {
@@ -1462,6 +1475,9 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
 
             @Override
             protected void onPostExecute(final ListAdapter result) {
+                if (!mAttachedToWindow) {
+                    return;
+                }
                 int line = getLayout().getLineForOffset(getChipStart(currentChip));
                 int bottom;
                 if (line == getLineCount() -1) {
@@ -1511,6 +1527,18 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
             listView.setItemChecked(position, true);
         }
         mCheckedItem = position;
+    }
+
+    private int putOffsetInRange(final float x, final float y) {
+        final int offset;
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.ICE_CREAM_SANDWICH) {
+            offset = getOffsetForPosition(x, y);
+        } else {
+            offset = supportGetOffsetForPosition(x, y);
+        }
+
+        return putOffsetInRange(offset);
     }
 
     // TODO: This algorithm will need a lot of tweaking after more people have used
@@ -1959,7 +1987,8 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
             return constructChipSpan(
                     RecipientEntry.constructFakeEntry((String) text, isValid(text.toString())),
                     true, false);
-        } else if (currentChip.getContactId() == RecipientEntry.GENERATED_CONTACT) {
+        } else if (currentChip.getContactId() == RecipientEntry.GENERATED_CONTACT
+                || currentChip.isGalContact()) {
             int start = getChipStart(currentChip);
             int end = getChipEnd(currentChip);
             getSpannable().removeSpan(currentChip);
@@ -2023,6 +2052,9 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
 
     private void showAddress(final DrawableRecipientChip currentChip, final ListPopupWindow popup,
             int width) {
+        if (!mAttachedToWindow) {
+            return;
+        }
         int line = getLayout().getLineForOffset(getChipStart(currentChip));
         int bottom = calculateOffsetFromBottom(line);
         // Align the alternates popup with the left side of the View,
@@ -2493,10 +2525,7 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
                 }
             }
             final BaseRecipientAdapter adapter = (BaseRecipientAdapter) getAdapter();
-            if (adapter == null) {
-                return null;
-            }
-            RecipientAlternatesAdapter.getMatchingRecipients(getContext(), addresses,
+            RecipientAlternatesAdapter.getMatchingRecipients(getContext(), adapter, addresses,
                     adapter.getAccount(), new RecipientMatchCallback() {
                         @Override
                         public void matchesFound(Map<String, RecipientEntry> entries) {
@@ -2623,7 +2652,8 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
                     addresses.add(createAddressText(chip.getEntry()));
                 }
             }
-            RecipientAlternatesAdapter.getMatchingRecipients(getContext(), addresses,
+            final BaseRecipientAdapter adapter = (BaseRecipientAdapter) getAdapter();
+            RecipientAlternatesAdapter.getMatchingRecipients(getContext(), adapter, addresses,
                     ((BaseRecipientAdapter) getAdapter()).getAccount(),
                     new RecipientMatchCallback() {
 
@@ -2634,21 +2664,14 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
                                         .getContactId())
                                         && getSpannable().getSpanStart(temp) != -1) {
                                     // Replace this.
-                                    RecipientEntry entry = createValidatedEntry(entries
+                                    final RecipientEntry entry = createValidatedEntry(entries
                                             .get(tokenizeAddress(temp.getEntry().getDestination())
                                                     .toLowerCase()));
-                                    // If we don't have a validated contact
-                                    // match, just use the
-                                    // entry as it existed before.
-                                    if (entry == null && !isPhoneQuery()) {
-                                        entry = temp.getEntry();
-                                    }
-                                    final RecipientEntry tempEntry = entry;
-                                    if (tempEntry != null) {
+                                    if (entry != null) {
                                         mHandler.post(new Runnable() {
                                             @Override
                                             public void run() {
-                                                replaceChip(temp, tempEntry);
+                                                replaceChip(temp, entry);
                                             }
                                         });
                                     }
@@ -2694,7 +2717,7 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
         }
         float x = event.getX();
         float y = event.getY();
-        int offset = putOffsetInRange(getOffsetForPosition(x, y));
+        final int offset = putOffsetInRange(x, y);
         DrawableRecipientChip currentChip = findChip(offset);
         if (currentChip != null) {
             if (mDragEnabled) {
@@ -2706,6 +2729,40 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
             }
         }
     }
+
+    // The following methods are used to provide some functionality on older versions of Android
+    // These methods were copied out of JB MR2's TextView
+    /////////////////////////////////////////////////
+    private int supportGetOffsetForPosition(float x, float y) {
+        if (getLayout() == null) return -1;
+        final int line = supportGetLineAtCoordinate(y);
+        final int offset = supportGetOffsetAtCoordinate(line, x);
+        return offset;
+    }
+
+    private float supportConvertToLocalHorizontalCoordinate(float x) {
+        x -= getTotalPaddingLeft();
+        // Clamp the position to inside of the view.
+        x = Math.max(0.0f, x);
+        x = Math.min(getWidth() - getTotalPaddingRight() - 1, x);
+        x += getScrollX();
+        return x;
+    }
+
+    private int supportGetLineAtCoordinate(float y) {
+        y -= getTotalPaddingLeft();
+        // Clamp the position to inside of the view.
+        y = Math.max(0.0f, y);
+        y = Math.min(getHeight() - getTotalPaddingBottom() - 1, y);
+        y += getScrollY();
+        return getLayout().getLineForVertical((int) y);
+    }
+
+    private int supportGetOffsetAtCoordinate(int line, float x) {
+        x = supportConvertToLocalHorizontalCoordinate(x);
+        return getLayout().getOffsetForHorizontal(line, x);
+    }
+    /////////////////////////////////////////////////
 
     /**
      * Enables drag-and-drop for chips.
@@ -2772,6 +2829,9 @@ public class RecipientEditTextView extends MultiAutoCompleteTextView implements
     }
 
     private void showCopyDialog(final String address) {
+        if (!mAttachedToWindow) {
+            return;
+        }
         mCopyAddress = address;
         mCopyDialog.setTitle(address);
         mCopyDialog.setContentView(R.layout.copy_chip_dialog_layout);

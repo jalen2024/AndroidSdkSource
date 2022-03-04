@@ -49,6 +49,7 @@ import static com.android.internal.telephony.CommandsInterface.CF_REASON_UNCONDI
 import static com.android.internal.telephony.CommandsInterface.SERVICE_CLASS_VOICE;
 import static com.android.internal.telephony.TelephonyProperties.PROPERTY_BASEBAND_VERSION;
 
+import com.android.internal.telephony.SmsBroadcastUndelivered;
 import com.android.internal.telephony.dataconnection.DcTracker;
 import com.android.internal.telephony.CallForwardInfo;
 import com.android.internal.telephony.CallStateException;
@@ -106,7 +107,6 @@ public class GSMPhone extends PhoneBase {
     GsmServiceStateTracker mSST;
     ArrayList <GsmMmiCode> mPendingMMIs = new ArrayList<GsmMmiCode>();
     SimPhoneBookInterfaceManager mSimPhoneBookIntManager;
-    SimSmsInterfaceManager mSimSmsIntManager;
     PhoneSubInfo mSubInfo;
 
 
@@ -122,6 +122,18 @@ public class GSMPhone extends PhoneBase {
     private String mImeiSv;
     private String mVmNumber;
 
+    // Create Cfu (Call forward unconditional) so that dialling number &
+    // mOnComplete (Message object passed by client) can be packed &
+    // given as a single Cfu object as user data to RIL.
+    private static class Cfu {
+        final String mSetCfNumber;
+        final Message mOnComplete;
+
+        Cfu(String cfNumber, Message onComplete) {
+            mSetCfNumber = cfNumber;
+            mOnComplete = onComplete;
+        }
+    }
 
     // Constructors
 
@@ -141,12 +153,10 @@ public class GSMPhone extends PhoneBase {
         mCi.setPhoneType(PhoneConstants.PHONE_TYPE_GSM);
         mCT = new GsmCallTracker(this);
         mSST = new GsmServiceStateTracker (this);
-        mSMS = new GsmSMSDispatcher(this, mSmsStorageMonitor, mSmsUsageMonitor);
 
         mDcTracker = new DcTracker(this);
         if (!unitTestMode) {
             mSimPhoneBookIntManager = new SimPhoneBookInterfaceManager(this);
-            mSimSmsIntManager = new SimSmsInterfaceManager(this, mSMS);
             mSubInfo = new PhoneSubInfo(this);
         }
 
@@ -218,7 +228,6 @@ public class GSMPhone extends PhoneBase {
             mDcTracker.dispose();
             mSST.dispose();
             mSimPhoneBookIntManager.dispose();
-            mSimSmsIntManager.dispose();
             mSubInfo.dispose();
         }
     }
@@ -228,7 +237,6 @@ public class GSMPhone extends PhoneBase {
         Rlog.d(LOG_TAG, "removeReferences");
         mSimulatedRadioControl = null;
         mSimPhoneBookIntManager = null;
-        mSimSmsIntManager = null;
         mSubInfo = null;
         mCT = null;
         mSST = null;
@@ -244,12 +252,17 @@ public class GSMPhone extends PhoneBase {
     @Override
     public ServiceState
     getServiceState() {
-        return mSST.mSS;
+        if (mSST != null) {
+            return mSST.mSS;
+        } else {
+            // avoid potential NPE in EmergencyCallHelper during Phone switch
+            return new ServiceState();
+        }
     }
 
     @Override
     public CellLocation getCellLocation() {
-        return mSST.mCellLoc;
+        return mSST.getCellLocation();
     }
 
     @Override
@@ -742,7 +755,7 @@ public class GSMPhone extends PhoneBase {
     public boolean handlePinMmi(String dialString) {
         GsmMmiCode mmi = GsmMmiCode.newFromDialString(dialString, this, mUiccApplication.get());
 
-        if (mmi != null && mmi.isPinCommand()) {
+        if (mmi != null && mmi.isPinPukCommand()) {
             mPendingMMIs.add(mmi);
             mMmiRegistrants.notifyRegistrants(new AsyncResult(null, mmi, null));
             mmi.processCode();
@@ -982,8 +995,9 @@ public class GSMPhone extends PhoneBase {
 
             Message resp;
             if (commandInterfaceCFReason == CF_REASON_UNCONDITIONAL) {
+                Cfu cfu = new Cfu(dialingNumber, onComplete);
                 resp = obtainMessage(EVENT_SET_CALL_FORWARD_DONE,
-                        isCfEnable(commandInterfaceCFAction) ? 1 : 0, 0, onComplete);
+                        isCfEnable(commandInterfaceCFAction) ? 1 : 0, 0, cfu);
             } else {
                 resp = onComplete;
             }
@@ -1215,6 +1229,11 @@ public class GSMPhone extends PhoneBase {
         AsyncResult ar;
         Message onComplete;
 
+        if (!mIsTheCurrentActivePhone) {
+            Rlog.e(LOG_TAG, "Received message " + msg +
+                    "[" + msg.what + "] while being destroyed. Ignoring.");
+            return;
+        }
         switch (msg.what) {
             case EVENT_RADIO_AVAILABLE: {
                 mCi.getBasebandVersion(
@@ -1313,13 +1332,13 @@ public class GSMPhone extends PhoneBase {
             case EVENT_SET_CALL_FORWARD_DONE:
                 ar = (AsyncResult)msg.obj;
                 IccRecords r = mIccRecords.get();
+                Cfu cfu = (Cfu) ar.userObj;
                 if (ar.exception == null && r != null) {
-                    r.setVoiceCallForwardingFlag(1, msg.arg1 == 1);
+                    r.setVoiceCallForwardingFlag(1, msg.arg1 == 1, cfu.mSetCfNumber);
                 }
-                onComplete = (Message) ar.userObj;
-                if (onComplete != null) {
-                    AsyncResult.forMessage(onComplete, ar.result, ar.exception);
-                    onComplete.sendToTarget();
+                if (cfu.mOnComplete != null) {
+                    AsyncResult.forMessage(cfu.mOnComplete, ar.result, ar.exception);
+                    cfu.mOnComplete.sendToTarget();
                 }
                 break;
 
@@ -1347,11 +1366,6 @@ public class GSMPhone extends PhoneBase {
                     AsyncResult.forMessage(onComplete, ar.result, ar.exception);
                     onComplete.sendToTarget();
                 }
-                break;
-
-            case EVENT_NEW_ICC_SMS:
-                ar = (AsyncResult)msg.obj;
-                mSMS.dispatchMessage((SmsMessage)ar.result);
                 break;
 
             case EVENT_SET_NETWORK_AUTOMATIC:
@@ -1506,11 +1520,12 @@ public class GSMPhone extends PhoneBase {
             if (infos == null || infos.length == 0) {
                 // Assume the default is not active
                 // Set unconditional CFF in SIM to false
-                r.setVoiceCallForwardingFlag(1, false);
+                r.setVoiceCallForwardingFlag(1, false, null);
             } else {
                 for (int i = 0, s = infos.length; i < s; i++) {
                     if ((infos[i].serviceClass & SERVICE_CLASS_VOICE) != 0) {
-                        r.setVoiceCallForwardingFlag(1, (infos[i].status == 1));
+                        r.setVoiceCallForwardingFlag(1, (infos[i].status == 1),
+                            infos[i].number);
                         // should only have the one
                         break;
                     }
@@ -1525,14 +1540,6 @@ public class GSMPhone extends PhoneBase {
     @Override
     public PhoneSubInfo getPhoneSubInfo(){
         return mSubInfo;
-    }
-
-    /**
-     * Retrieves the IccSmsInterfaceManager of the GSMPhone
-     */
-    @Override
-    public IccSmsInterfaceManager getIccSmsInterfaceManager(){
-        return mSimSmsIntManager;
     }
 
     /**
@@ -1590,7 +1597,6 @@ public class GSMPhone extends PhoneBase {
         }
         r.registerForNetworkSelectionModeAutomatic(
                 this, EVENT_SET_NETWORK_AUTOMATIC, null);
-        r.registerForNewSms(this, EVENT_NEW_ICC_SMS, null);
         r.registerForRecordsEvents(this, EVENT_ICC_RECORD_EVENTS, null);
         r.registerForRecordsLoaded(this, EVENT_SIM_RECORDS_LOADED, null);
     }
@@ -1601,7 +1607,6 @@ public class GSMPhone extends PhoneBase {
             return;
         }
         r.unregisterForNetworkSelectionModeAutomatic(this);
-        r.unregisterForNewSms(this);
         r.unregisterForRecordsEvents(this);
         r.unregisterForRecordsLoaded(this);
     }
@@ -1614,7 +1619,6 @@ public class GSMPhone extends PhoneBase {
         pw.println(" mSST=" + mSST);
         pw.println(" mPendingMMIs=" + mPendingMMIs);
         pw.println(" mSimPhoneBookIntManager=" + mSimPhoneBookIntManager);
-        pw.println(" mSimSmsIntManager=" + mSimSmsIntManager);
         pw.println(" mSubInfo=" + mSubInfo);
         if (VDBG) pw.println(" mImei=" + mImei);
         if (VDBG) pw.println(" mImeiSv=" + mImeiSv);

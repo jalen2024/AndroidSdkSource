@@ -16,14 +16,14 @@
 
 package com.android.systemui.statusbar.tv;
 
-import android.service.notification.StatusBarNotification;
-import com.android.internal.statusbar.StatusBarIcon;
-import com.android.systemui.statusbar.BaseStatusBar;
-
 import android.os.IBinder;
+import android.service.notification.StatusBarNotification;
 import android.view.View;
 import android.view.ViewGroup.LayoutParams;
 import android.view.WindowManager;
+
+import com.android.internal.statusbar.StatusBarIcon;
+import com.android.systemui.statusbar.BaseStatusBar;
 
 /*
  * Status bar implementation for "large screen" products that mostly present no on-screen nav
@@ -89,17 +89,11 @@ public class TvStatusBar extends BaseStatusBar {
     }
 
     @Override // CommandQueue
-    public void setNavigationIconHints(int hints) {
+    public void setWindowState(int window, int state) {
     }
 
     @Override
     protected void createAndAddWindows() {
-    }
-
-    @Override
-    protected WindowManager.LayoutParams getRecentsLayoutParams(
-            LayoutParams layoutParams) {
-        return null;
     }
 
     @Override
@@ -140,6 +134,10 @@ public class TvStatusBar extends BaseStatusBar {
 
     public View getStatusBarView() {
         return null;
+    }
+
+    @Override
+    public void resetHeadsUpDecayTimer() {
     }
 
     @Override

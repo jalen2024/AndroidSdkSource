@@ -51,10 +51,13 @@ import android.net.LinkProperties;
 import android.net.NetworkInfo;
 import android.net.NetworkInfo.DetailedState;
 import android.net.NetworkUtils;
+import android.net.RouteInfo;
 import android.net.wifi.WpsResult.Status;
 import android.net.wifi.p2p.WifiP2pManager;
 import android.net.wifi.p2p.WifiP2pService;
+import android.os.BatteryStats;
 import android.os.Binder;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.INetworkManagementService;
 import android.os.Message;
@@ -63,12 +66,14 @@ import android.os.PowerManager;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.ServiceManager;
+import android.os.SystemClock;
 import android.os.SystemProperties;
 import android.os.UserHandle;
 import android.os.WorkSource;
 import android.provider.Settings;
-import android.text.TextUtils;
+import android.util.Log;
 import android.util.LruCache;
+import android.text.TextUtils;
 
 import com.android.internal.R;
 import com.android.internal.app.IBatteryStats;
@@ -77,11 +82,15 @@ import com.android.internal.util.Protocol;
 import com.android.internal.util.State;
 import com.android.internal.util.StateMachine;
 
+import com.android.server.net.BaseNetworkObserver;
+
 import java.io.FileDescriptor;
 import java.io.PrintWriter;
 import java.net.InetAddress;
+import java.net.Inet6Address;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.Iterator;
@@ -119,6 +128,13 @@ public class WifiStateMachine extends StateMachine {
     private static final Pattern scanResultPattern = Pattern.compile("\t+");
     private static final int SCAN_RESULT_CACHE_SIZE = 80;
     private final LruCache<String, ScanResult> mScanResultCache;
+
+    /* Batch scan results */
+    private final List<BatchedScanResult> mBatchedScanResults =
+            new ArrayList<BatchedScanResult>();
+    private int mBatchedScanOwnerUid = UNKNOWN_SCAN_SOURCE;
+    private int mExpectedBatchedScans = 0;
+    private long mBatchedScanMinPollTime = 0;
 
     /* Chipset supports background scan */
     private final boolean mBackgroundScanSupported;
@@ -188,7 +204,18 @@ public class WifiStateMachine extends StateMachine {
     /* Tracks sequence number on a driver time out */
     private int mDriverStartToken = 0;
 
+    /**
+     * The link properties of the wifi interface.
+     * Do not modify this directly; use updateLinkProperties instead.
+     */
     private LinkProperties mLinkProperties;
+
+    /**
+     * Subset of link properties coming from netlink.
+     * Currently includes IPv4 and IPv6 addresses. In the future will also include IPv6 DNS servers
+     * and domains obtained from router advertisements (RFC 6106).
+     */
+    private final LinkProperties mNetlinkLinkProperties;
 
     /* Tracks sequence number on a periodic scan message */
     private int mPeriodicScanToken = 0;
@@ -204,10 +231,45 @@ public class WifiStateMachine extends StateMachine {
     private NetworkInfo mNetworkInfo;
     private SupplicantStateTracker mSupplicantStateTracker;
     private DhcpStateMachine mDhcpStateMachine;
+    private boolean mDhcpActive = false;
+
+    private class InterfaceObserver extends BaseNetworkObserver {
+        private WifiStateMachine mWifiStateMachine;
+
+        InterfaceObserver(WifiStateMachine wifiStateMachine) {
+            super();
+            mWifiStateMachine = wifiStateMachine;
+        }
+
+        @Override
+        public void addressUpdated(String address, String iface, int flags, int scope) {
+            if (mWifiStateMachine.mInterfaceName.equals(iface)) {
+                if (DBG) {
+                    log("addressUpdated: " + address + " on " + iface +
+                        " flags " + flags + " scope " + scope);
+                }
+                mWifiStateMachine.sendMessage(CMD_IP_ADDRESS_UPDATED, new LinkAddress(address));
+            }
+        }
+
+        @Override
+        public void addressRemoved(String address, String iface, int flags, int scope) {
+            if (mWifiStateMachine.mInterfaceName.equals(iface)) {
+                if (DBG) {
+                    log("addressRemoved: " + address + " on " + iface +
+                        " flags " + flags + " scope " + scope);
+                }
+                mWifiStateMachine.sendMessage(CMD_IP_ADDRESS_REMOVED, new LinkAddress(address));
+            }
+        }
+    }
+
+    private InterfaceObserver mInterfaceObserver;
 
     private AlarmManager mAlarmManager;
     private PendingIntent mScanIntent;
     private PendingIntent mDriverStopIntent;
+    private PendingIntent mBatchedScanIntervalIntent;
 
     /* Tracks current frequency mode */
     private AtomicInteger mFrequencyBand = new AtomicInteger(WifiManager.WIFI_FREQUENCY_BAND_AUTO);
@@ -336,6 +398,8 @@ public class WifiStateMachine extends StateMachine {
     static final int CMD_SET_FREQUENCY_BAND               = BASE + 90;
     /* Enable background scan for configured networks */
     static final int CMD_ENABLE_BACKGROUND_SCAN           = BASE + 91;
+    /* Enable TDLS on a specific MAC address */
+    static final int CMD_ENABLE_TDLS                      = BASE + 92;
 
     /* Commands from/to the SupplicantStateTracker */
     /* Reset the supplicant state tracker */
@@ -351,8 +415,29 @@ public class WifiStateMachine extends StateMachine {
 
     public static final int CMD_BOOT_COMPLETED            = BASE + 134;
 
+    /* change the batch scan settings.
+     * arg1 = responsible UID
+     * arg2 = csph (channel scans per hour)
+     * obj = bundle with the new settings and the optional worksource
+     */
+    public static final int CMD_SET_BATCHED_SCAN          = BASE + 135;
+    public static final int CMD_START_NEXT_BATCHED_SCAN   = BASE + 136;
+    public static final int CMD_POLL_BATCHED_SCAN         = BASE + 137;
+
+    /* Link configuration (IP address, DNS, ...) changes */
+    /* An new IP address was added to our interface, or an existing IP address was updated */
+    static final int CMD_IP_ADDRESS_UPDATED               = BASE + 140;
+    /* An IP address was removed from our interface */
+    static final int CMD_IP_ADDRESS_REMOVED               = BASE + 141;
+    /* Reload all networks and reconnect */
+    static final int CMD_RELOAD_TLS_AND_RECONNECT         = BASE + 142;
+
+    /* Wifi state machine modes of operation */
+    /* CONNECT_MODE - connect to any 'known' AP when it becomes available */
     public static final int CONNECT_MODE                   = 1;
+    /* SCAN_ONLY_MODE - don't connect to any APs; scan, but only while apps hold lock */
     public static final int SCAN_ONLY_MODE                 = 2;
+    /* SCAN_ONLY_WITH_WIFI_OFF - scan, but don't connect to any APs */
     public static final int SCAN_ONLY_WITH_WIFI_OFF_MODE   = 3;
 
     private static final int SUCCESS = 1;
@@ -417,6 +502,10 @@ public class WifiStateMachine extends StateMachine {
     // sometimes telephony gives us this data before boot is complete and we can't store it
     // until after, so the write is deferred
     private volatile String mPersistedCountryCode;
+
+    // Supplicant doesn't like setting the same country code multiple times (it may drop
+    // currently connected network), so we save the country code here to avoid redundency
+    private String mLastSetCountryCode;
 
     private static final int MIN_RSSI = -200;
     private static final int MAX_RSSI = 256;
@@ -515,6 +604,8 @@ public class WifiStateMachine extends StateMachine {
     private static final String ACTION_DELAYED_DRIVER_STOP =
         "com.android.server.WifiManager.action.DELAYED_DRIVER_STOP";
 
+    private static final String ACTION_REFRESH_BATCHED_SCAN =
+            "com.android.server.WifiManager.action.REFRESH_BATCHED_SCAN";
     /**
      * Keep track of whether WIFI is running.
      */
@@ -537,14 +628,26 @@ public class WifiStateMachine extends StateMachine {
 
     private final IBatteryStats mBatteryStats;
 
+    private BatchedScanSettings mBatchedScanSettings = null;
+
+    /**
+     * Track the worksource/cost of the current settings and track what's been noted
+     * to the battery stats, so we can mark the end of the previous when changing.
+     */
+    private WorkSource mBatchedScanWorkSource = null;
+    private int mBatchedScanCsph = 0;
+    private WorkSource mNotedBatchedScanWorkSource = null;
+    private int mNotedBatchedScanCsph = 0;
+
+
     public WifiStateMachine(Context context, String wlanInterface) {
         super("WifiStateMachine");
-
         mContext = context;
         mInterfaceName = wlanInterface;
 
         mNetworkInfo = new NetworkInfo(ConnectivityManager.TYPE_WIFI, 0, NETWORKTYPE, "");
-        mBatteryStats = IBatteryStats.Stub.asInterface(ServiceManager.getService("batteryinfo"));
+        mBatteryStats = IBatteryStats.Stub.asInterface(ServiceManager.getService(
+                BatteryStats.SERVICE_NAME));
 
         IBinder b = ServiceManager.getService(Context.NETWORKMANAGEMENT_SERVICE);
         mNwService = INetworkManagementService.Stub.asInterface(b);
@@ -559,18 +662,28 @@ public class WifiStateMachine extends StateMachine {
         mSupplicantStateTracker = new SupplicantStateTracker(context, this, mWifiConfigStore,
                 getHandler());
         mLinkProperties = new LinkProperties();
+        mNetlinkLinkProperties = new LinkProperties();
 
         mWifiP2pManager = (WifiP2pManager) mContext.getSystemService(Context.WIFI_P2P_SERVICE);
 
         mNetworkInfo.setIsAvailable(false);
-        mLinkProperties.clear();
         mLastBssid = null;
         mLastNetworkId = WifiConfiguration.INVALID_NETWORK_ID;
         mLastSignalLevel = -1;
 
+        mInterfaceObserver = new InterfaceObserver(this);
+        try {
+            mNwService.registerObserver(mInterfaceObserver);
+        } catch (RemoteException e) {
+            loge("Couldn't register interface observer: " + e.toString());
+        }
+
         mAlarmManager = (AlarmManager)mContext.getSystemService(Context.ALARM_SERVICE);
         Intent scanIntent = new Intent(ACTION_START_SCAN, null);
         mScanIntent = PendingIntent.getBroadcast(mContext, SCAN_REQUEST, scanIntent, 0);
+
+        Intent batchedIntent = new Intent(ACTION_REFRESH_BATCHED_SCAN, null);
+        mBatchedScanIntervalIntent = PendingIntent.getBroadcast(mContext, 0, batchedIntent, 0);
 
         mDefaultFrameworkScanIntervalMs = mContext.getResources().getInteger(
                 R.integer.config_wifi_framework_scan_interval);
@@ -603,27 +716,31 @@ public class WifiStateMachine extends StateMachine {
                 new BroadcastReceiver() {
                     @Override
                     public void onReceive(Context context, Intent intent) {
-                        startScan(UNKNOWN_SCAN_SOURCE);
+                        final WorkSource workSource = null;
+                        startScan(UNKNOWN_SCAN_SOURCE, workSource);
                     }
                 },
                 new IntentFilter(ACTION_START_SCAN));
 
-        IntentFilter screenFilter = new IntentFilter();
-        screenFilter.addAction(Intent.ACTION_SCREEN_ON);
-        screenFilter.addAction(Intent.ACTION_SCREEN_OFF);
-        BroadcastReceiver screenReceiver = new BroadcastReceiver() {
-            @Override
-            public void onReceive(Context context, Intent intent) {
-                String action = intent.getAction();
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(Intent.ACTION_SCREEN_ON);
+        filter.addAction(Intent.ACTION_SCREEN_OFF);
+        filter.addAction(ACTION_REFRESH_BATCHED_SCAN);
+        mContext.registerReceiver(
+                new BroadcastReceiver() {
+                    @Override
+                    public void onReceive(Context context, Intent intent) {
+                        String action = intent.getAction();
 
-                if (action.equals(Intent.ACTION_SCREEN_ON)) {
-                    handleScreenStateChanged(true);
-                } else if (action.equals(Intent.ACTION_SCREEN_OFF)) {
-                    handleScreenStateChanged(false);
-                }
-            }
-        };
-        mContext.registerReceiver(screenReceiver, screenFilter);
+                        if (action.equals(Intent.ACTION_SCREEN_ON)) {
+                            handleScreenStateChanged(true);
+                        } else if (action.equals(Intent.ACTION_SCREEN_OFF)) {
+                            handleScreenStateChanged(false);
+                        } else if (action.equals(ACTION_REFRESH_BATCHED_SCAN)) {
+                            startNextBatchedScanAsync();
+                        }
+                    }
+                }, filter);
 
         mContext.registerReceiver(
                 new BroadcastReceiver() {
@@ -690,7 +807,7 @@ public class WifiStateMachine extends StateMachine {
 
         setInitialState(mInitialState);
 
-        setLogRecSize(300);
+        setLogRecSize(2000);
         setLogOnlyTransitions(false);
         if (DBG) setDbg(true);
 
@@ -721,15 +838,337 @@ public class WifiStateMachine extends StateMachine {
     }
 
     /**
-     * TODO: doc
+     * Initiate a wifi scan.  If workSource is not null, blame is given to it,
+     * otherwise blame is given to callingUid.
+     *
+     * @param callingUid The uid initiating the wifi scan.  Blame will be given
+     *                   here unless workSource is specified.
+     * @param workSource If not null, blame is given to workSource.
      */
-    public void startScan(int callingUid) {
-        sendMessage(CMD_START_SCAN, callingUid);
+    public void startScan(int callingUid, WorkSource workSource) {
+        sendMessage(CMD_START_SCAN, callingUid, 0, workSource);
     }
 
-    private void noteScanStart(int callingUid) {
-        if (mScanWorkSource == null && callingUid != UNKNOWN_SCAN_SOURCE) {
-            mScanWorkSource = new WorkSource(callingUid);
+    /**
+     * start or stop batched scanning using the given settings
+     */
+    private static final String BATCHED_SETTING = "batched_settings";
+    private static final String BATCHED_WORKSOURCE = "batched_worksource";
+    public void setBatchedScanSettings(BatchedScanSettings settings, int callingUid, int csph,
+            WorkSource workSource) {
+        Bundle bundle = new Bundle();
+        bundle.putParcelable(BATCHED_SETTING, settings);
+        bundle.putParcelable(BATCHED_WORKSOURCE, workSource);
+        sendMessage(CMD_SET_BATCHED_SCAN, callingUid, csph, bundle);
+    }
+
+    public List<BatchedScanResult> syncGetBatchedScanResultsList() {
+        synchronized (mBatchedScanResults) {
+            List<BatchedScanResult> batchedScanList =
+                    new ArrayList<BatchedScanResult>(mBatchedScanResults.size());
+            for(BatchedScanResult result: mBatchedScanResults) {
+                batchedScanList.add(new BatchedScanResult(result));
+            }
+            return batchedScanList;
+        }
+    }
+
+    public void requestBatchedScanPoll() {
+        sendMessage(CMD_POLL_BATCHED_SCAN);
+    }
+
+    private void startBatchedScan() {
+        if (mBatchedScanSettings == null) return;
+
+        if (mDhcpActive) {
+            if (DBG) log("not starting Batched Scans due to DHCP");
+            return;
+        }
+
+        // first grab any existing data
+        retrieveBatchedScanData();
+
+        mAlarmManager.cancel(mBatchedScanIntervalIntent);
+
+        String scansExpected = mWifiNative.setBatchedScanSettings(mBatchedScanSettings);
+        try {
+            mExpectedBatchedScans = Integer.parseInt(scansExpected);
+            setNextBatchedAlarm(mExpectedBatchedScans);
+            if (mExpectedBatchedScans > 0) noteBatchedScanStart();
+        } catch (NumberFormatException e) {
+            stopBatchedScan();
+            loge("Exception parsing WifiNative.setBatchedScanSettings response " + e);
+        }
+    }
+
+    // called from BroadcastListener
+    private void startNextBatchedScanAsync() {
+        sendMessage(CMD_START_NEXT_BATCHED_SCAN);
+    }
+
+    private void startNextBatchedScan() {
+        // first grab any existing data
+        retrieveBatchedScanData();
+
+        setNextBatchedAlarm(mExpectedBatchedScans);
+    }
+
+    private void handleBatchedScanPollRequest() {
+        if (DBG) {
+            log("handleBatchedScanPoll Request - mBatchedScanMinPollTime=" +
+                    mBatchedScanMinPollTime + " , mBatchedScanSettings=" +
+                    mBatchedScanSettings);
+        }
+        // if there is no appropriate PollTime that's because we either aren't
+        // batching or we've already set a time for a poll request
+        if (mBatchedScanMinPollTime == 0) return;
+        if (mBatchedScanSettings == null) return;
+
+        long now = System.currentTimeMillis();
+
+        if (now > mBatchedScanMinPollTime) {
+            // do the poll and reset our timers
+            startNextBatchedScan();
+        } else {
+            mAlarmManager.setExact(AlarmManager.RTC_WAKEUP, mBatchedScanMinPollTime,
+                    mBatchedScanIntervalIntent);
+            mBatchedScanMinPollTime = 0;
+        }
+    }
+
+    // return true if new/different
+    private boolean recordBatchedScanSettings(int responsibleUid, int csph, Bundle bundle) {
+        BatchedScanSettings settings = bundle.getParcelable(BATCHED_SETTING);
+        WorkSource responsibleWorkSource = bundle.getParcelable(BATCHED_WORKSOURCE);
+
+        if (DBG) {
+            log("set batched scan to " + settings + " for uid=" + responsibleUid +
+                    ", worksource=" + responsibleWorkSource);
+        }
+        if (settings != null) {
+            if (settings.equals(mBatchedScanSettings)) return false;
+        } else {
+            if (mBatchedScanSettings == null) return false;
+        }
+        mBatchedScanSettings = settings;
+        if (responsibleWorkSource == null) responsibleWorkSource = new WorkSource(responsibleUid);
+        mBatchedScanWorkSource = responsibleWorkSource;
+        mBatchedScanCsph = csph;
+        return true;
+    }
+
+    private void stopBatchedScan() {
+        mAlarmManager.cancel(mBatchedScanIntervalIntent);
+        retrieveBatchedScanData();
+        mWifiNative.setBatchedScanSettings(null);
+        noteBatchedScanStop();
+    }
+
+    private void setNextBatchedAlarm(int scansExpected) {
+
+        if (mBatchedScanSettings == null || scansExpected < 1) return;
+
+        mBatchedScanMinPollTime = System.currentTimeMillis() +
+                mBatchedScanSettings.scanIntervalSec * 1000;
+
+        if (mBatchedScanSettings.maxScansPerBatch < scansExpected) {
+            scansExpected = mBatchedScanSettings.maxScansPerBatch;
+        }
+
+        int secToFull = mBatchedScanSettings.scanIntervalSec;
+        secToFull *= scansExpected;
+
+        int debugPeriod = SystemProperties.getInt("wifi.batchedScan.pollPeriod", 0);
+        if (debugPeriod > 0) secToFull = debugPeriod;
+
+        // set the alarm to do the next poll.  We set it a little short as we'd rather
+        // wake up wearly than miss a scan due to buffer overflow
+        mAlarmManager.setExact(AlarmManager.RTC_WAKEUP, System.currentTimeMillis()
+                + ((secToFull - (mBatchedScanSettings.scanIntervalSec / 2)) * 1000),
+                mBatchedScanIntervalIntent);
+    }
+
+    /**
+     * Start reading new scan data
+     * Data comes in as:
+     * "scancount=5\n"
+     * "nextcount=5\n"
+     *   "apcount=3\n"
+     *   "trunc\n" (optional)
+     *     "bssid=...\n"
+     *     "ssid=...\n"
+     *     "freq=...\n" (in Mhz)
+     *     "level=...\n"
+     *     "dist=...\n" (in cm)
+     *     "distsd=...\n" (standard deviation, in cm)
+     *     "===="
+     *     "bssid=...\n"
+     *     etc
+     *     "===="
+     *     "bssid=...\n"
+     *     etc
+     *     "%%%%"
+     *   "apcount=2\n"
+     *     "bssid=...\n"
+     *     etc
+     *     "%%%%
+     *   etc
+     *   "----"
+     */
+    private final static boolean DEBUG_PARSE = false;
+    private void retrieveBatchedScanData() {
+        String rawData = mWifiNative.getBatchedScanResults();
+        if (DEBUG_PARSE) log("rawData = " + rawData);
+        mBatchedScanMinPollTime = 0;
+        if (rawData == null || rawData.equalsIgnoreCase("OK")) {
+            loge("Unexpected BatchedScanResults :" + rawData);
+            return;
+        }
+
+        int scanCount = 0;
+        final String END_OF_BATCHES = "----";
+        final String SCANCOUNT = "scancount=";
+        final String TRUNCATED = "trunc";
+        final String AGE = "age=";
+        final String DIST = "dist=";
+        final String DISTSD = "distSd=";
+
+        String splitData[] = rawData.split("\n");
+        int n = 0;
+        if (splitData[n].startsWith(SCANCOUNT)) {
+            try {
+                scanCount = Integer.parseInt(splitData[n++].substring(SCANCOUNT.length()));
+            } catch (NumberFormatException e) {
+                loge("scancount parseInt Exception from " + splitData[n]);
+            }
+        } else log("scancount not found");
+        if (scanCount == 0) {
+            loge("scanCount==0 - aborting");
+            return;
+        }
+
+        final Intent intent = new Intent(WifiManager.BATCHED_SCAN_RESULTS_AVAILABLE_ACTION);
+        intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
+
+        synchronized (mBatchedScanResults) {
+            mBatchedScanResults.clear();
+            BatchedScanResult batchedScanResult = new BatchedScanResult();
+
+            String bssid = null;
+            WifiSsid wifiSsid = null;
+            int level = 0;
+            int freq = 0;
+            int dist, distSd;
+            long tsf = 0;
+            dist = distSd = ScanResult.UNSPECIFIED;
+            final long now = SystemClock.elapsedRealtime();
+            final int bssidStrLen = BSSID_STR.length();
+
+            while (true) {
+                while (n < splitData.length) {
+                    if (DEBUG_PARSE) logd("parsing " + splitData[n]);
+                    if (splitData[n].equals(END_OF_BATCHES)) {
+                        if (n+1 != splitData.length) {
+                            loge("didn't consume " + (splitData.length-n));
+                        }
+                        if (mBatchedScanResults.size() > 0) {
+                            mContext.sendBroadcastAsUser(intent, UserHandle.ALL);
+                        }
+                        logd("retrieveBatchedScanResults X");
+                        return;
+                    }
+                    if ((splitData[n].equals(END_STR)) || splitData[n].equals(DELIMITER_STR)) {
+                        if (bssid != null) {
+                            batchedScanResult.scanResults.add(new ScanResult(
+                                    wifiSsid, bssid, "", level, freq, tsf, dist, distSd));
+                            wifiSsid = null;
+                            bssid = null;
+                            level = 0;
+                            freq = 0;
+                            tsf = 0;
+                            dist = distSd = ScanResult.UNSPECIFIED;
+                        }
+                        if (splitData[n].equals(END_STR)) {
+                            if (batchedScanResult.scanResults.size() != 0) {
+                                mBatchedScanResults.add(batchedScanResult);
+                                batchedScanResult = new BatchedScanResult();
+                            } else {
+                                logd("Found empty batch");
+                            }
+                        }
+                    } else if (splitData[n].equals(TRUNCATED)) {
+                        batchedScanResult.truncated = true;
+                    } else if (splitData[n].startsWith(BSSID_STR)) {
+                        bssid = new String(splitData[n].getBytes(), bssidStrLen,
+                                splitData[n].length() - bssidStrLen);
+                    } else if (splitData[n].startsWith(FREQ_STR)) {
+                        try {
+                            freq = Integer.parseInt(splitData[n].substring(FREQ_STR.length()));
+                        } catch (NumberFormatException e) {
+                            loge("Invalid freqency: " + splitData[n]);
+                            freq = 0;
+                        }
+                    } else if (splitData[n].startsWith(AGE)) {
+                        try {
+                            tsf = now - Long.parseLong(splitData[n].substring(AGE.length()));
+                            tsf *= 1000; // convert mS -> uS
+                        } catch (NumberFormatException e) {
+                            loge("Invalid timestamp: " + splitData[n]);
+                            tsf = 0;
+                        }
+                    } else if (splitData[n].startsWith(SSID_STR)) {
+                        wifiSsid = WifiSsid.createFromAsciiEncoded(
+                                splitData[n].substring(SSID_STR.length()));
+                    } else if (splitData[n].startsWith(LEVEL_STR)) {
+                        try {
+                            level = Integer.parseInt(splitData[n].substring(LEVEL_STR.length()));
+                            if (level > 0) level -= 256;
+                        } catch (NumberFormatException e) {
+                            loge("Invalid level: " + splitData[n]);
+                            level = 0;
+                        }
+                    } else if (splitData[n].startsWith(DIST)) {
+                        try {
+                            dist = Integer.parseInt(splitData[n].substring(DIST.length()));
+                        } catch (NumberFormatException e) {
+                            loge("Invalid distance: " + splitData[n]);
+                            dist = ScanResult.UNSPECIFIED;
+                        }
+                    } else if (splitData[n].startsWith(DISTSD)) {
+                        try {
+                            distSd = Integer.parseInt(splitData[n].substring(DISTSD.length()));
+                        } catch (NumberFormatException e) {
+                            loge("Invalid distanceSd: " + splitData[n]);
+                            distSd = ScanResult.UNSPECIFIED;
+                        }
+                    } else {
+                        loge("Unable to parse batched scan result line: " + splitData[n]);
+                    }
+                    n++;
+                }
+                rawData = mWifiNative.getBatchedScanResults();
+                if (DEBUG_PARSE) log("reading more data:\n" + rawData);
+                if (rawData == null) {
+                    loge("Unexpected null BatchedScanResults");
+                    return;
+                }
+                splitData = rawData.split("\n");
+                if (splitData.length == 0 || splitData[0].equals("ok")) {
+                    loge("batch scan results just ended!");
+                    if (mBatchedScanResults.size() > 0) {
+                        mContext.sendStickyBroadcastAsUser(intent, UserHandle.ALL);
+                    }
+                    return;
+                }
+                n = 0;
+            }
+        }
+    }
+
+    // If workSource is not null, blame is given to it, otherwise blame is given to callingUid.
+    private void noteScanStart(int callingUid, WorkSource workSource) {
+        if (mScanWorkSource == null && (callingUid != UNKNOWN_SCAN_SOURCE || workSource != null)) {
+            mScanWorkSource = workSource != null ? workSource : new WorkSource(callingUid);
             try {
                 mBatteryStats.noteWifiScanStartedFromSource(mScanWorkSource);
             } catch (RemoteException e) {
@@ -746,6 +1185,44 @@ public class WifiStateMachine extends StateMachine {
                 log(e.toString());
             } finally {
                 mScanWorkSource = null;
+            }
+        }
+    }
+
+    private void noteBatchedScanStart() {
+        // note the end of a previous scan set
+        if (mNotedBatchedScanWorkSource != null &&
+                (mNotedBatchedScanWorkSource.equals(mBatchedScanWorkSource) == false ||
+                 mNotedBatchedScanCsph != mBatchedScanCsph)) {
+            try {
+                mBatteryStats.noteWifiBatchedScanStoppedFromSource(mNotedBatchedScanWorkSource);
+            } catch (RemoteException e) {
+                log(e.toString());
+            } finally {
+                mNotedBatchedScanWorkSource = null;
+                mNotedBatchedScanCsph = 0;
+            }
+        }
+        // note the start of the new
+        try {
+            mBatteryStats.noteWifiBatchedScanStartedFromSource(mBatchedScanWorkSource,
+                    mBatchedScanCsph);
+            mNotedBatchedScanWorkSource = mBatchedScanWorkSource;
+            mNotedBatchedScanCsph = mBatchedScanCsph;
+        } catch (RemoteException e) {
+            log(e.toString());
+        }
+    }
+
+    private void noteBatchedScanStop() {
+        if (mNotedBatchedScanWorkSource != null) {
+            try {
+                mBatteryStats.noteWifiBatchedScanStoppedFromSource(mNotedBatchedScanWorkSource);
+            } catch (RemoteException e) {
+                log(e.toString());
+            } finally {
+                mNotedBatchedScanWorkSource = null;
+                mNotedBatchedScanCsph = 0;
             }
         }
     }
@@ -876,6 +1353,7 @@ public class WifiStateMachine extends StateMachine {
      * TODO: doc
      */
     public void setOperationalMode(int mode) {
+        if (DBG) log("setting operational mode to " + String.valueOf(mode));
         sendMessage(CMD_SET_OPERATIONAL_MODE, mode, 0);
     }
 
@@ -911,6 +1389,14 @@ public class WifiStateMachine extends StateMachine {
      */
     public void reassociateCommand() {
         sendMessage(CMD_REASSOCIATE);
+    }
+
+    /**
+     * Reload networks and then reconnect; helps load correct data for TLS networks
+     */
+
+    public void reloadTlsNetworksAndReconnect() {
+        sendMessage(CMD_RELOAD_TLS_AND_RECONNECT);
     }
 
     /**
@@ -1055,6 +1541,7 @@ public class WifiStateMachine extends StateMachine {
                     countryCode);
         }
         sendMessage(CMD_SET_COUNTRY_CODE, countryCode);
+        mWifiP2pChannel.sendMessage(WifiP2pService.SET_COUNTRY_CODE, countryCode);
     }
 
     /**
@@ -1069,6 +1556,14 @@ public class WifiStateMachine extends StateMachine {
                     band);
         }
         sendMessage(CMD_SET_FREQUENCY_BAND, band, 0);
+    }
+
+    /**
+     * Enable TDLS for a specific MAC address
+     */
+    public void enableTdls(String remoteMacAddress, boolean enable) {
+        int enabler = enable ? 1 : 0;
+        sendMessage(CMD_ENABLE_TDLS, enabler, 0, remoteMacAddress);
     }
 
     /**
@@ -1367,6 +1862,7 @@ public class WifiStateMachine extends StateMachine {
         mContext.sendStickyBroadcastAsUser(intent, UserHandle.ALL);
     }
 
+    private static final String ID_STR = "id=";
     private static final String BSSID_STR = "bssid=";
     private static final String FREQ_STR = "freq=";
     private static final String LEVEL_STR = "level=";
@@ -1378,6 +1874,8 @@ public class WifiStateMachine extends StateMachine {
 
     /**
      * Format:
+     *
+     * id=1
      * bssid=68:7f:76:d7:1a:6e
      * freq=2412
      * level=-44
@@ -1385,6 +1883,7 @@ public class WifiStateMachine extends StateMachine {
      * flags=[WPA2-PSK-CCMP][WPS][ESS]
      * ssid=zfdy
      * ====
+     * id=2
      * bssid=68:5f:74:d7:1a:6f
      * freq=5180
      * level=-73
@@ -1393,25 +1892,57 @@ public class WifiStateMachine extends StateMachine {
      * ssid=zuby
      * ====
      */
-    private void setScanResults(String scanResults) {
+    private void setScanResults() {
         String bssid = "";
         int level = 0;
         int freq = 0;
         long tsf = 0;
         String flags = "";
         WifiSsid wifiSsid = null;
+        String scanResults;
+        String tmpResults;
+        StringBuffer scanResultsBuf = new StringBuffer();
+        int sid = 0;
 
-        if (scanResults == null) {
-            return;
+        while (true) {
+            tmpResults = mWifiNative.scanResults(sid);
+            if (TextUtils.isEmpty(tmpResults)) break;
+            scanResultsBuf.append(tmpResults);
+            scanResultsBuf.append("\n");
+            String[] lines = tmpResults.split("\n");
+            sid = -1;
+            for (int i=lines.length - 1; i >= 0; i--) {
+                if (lines[i].startsWith(END_STR)) {
+                    break;
+                } else if (lines[i].startsWith(ID_STR)) {
+                    try {
+                        sid = Integer.parseInt(lines[i].substring(ID_STR.length())) + 1;
+                    } catch (NumberFormatException e) {
+                        // Nothing to do
+                    }
+                    break;
+                }
+            }
+            if (sid == -1) break;
         }
 
+        scanResults = scanResultsBuf.toString();
+        if (TextUtils.isEmpty(scanResults)) {
+           return;
+        }
+
+        // note that all these splits and substrings keep references to the original
+        // huge string buffer while the amount we really want is generally pretty small
+        // so make copies instead (one example b/11087956 wasted 400k of heap here).
         synchronized(mScanResultCache) {
             mScanResults = new ArrayList<ScanResult>();
             String[] lines = scanResults.split("\n");
+            final int bssidStrLen = BSSID_STR.length();
+            final int flagLen = FLAGS_STR.length();
 
             for (String line : lines) {
                 if (line.startsWith(BSSID_STR)) {
-                    bssid = line.substring(BSSID_STR.length());
+                    bssid = new String(line.getBytes(), bssidStrLen, line.length() - bssidStrLen);
                 } else if (line.startsWith(FREQ_STR)) {
                     try {
                         freq = Integer.parseInt(line.substring(FREQ_STR.length()));
@@ -1435,7 +1966,7 @@ public class WifiStateMachine extends StateMachine {
                         tsf = 0;
                     }
                 } else if (line.startsWith(FLAGS_STR)) {
-                    flags = line.substring(FLAGS_STR.length());
+                    flags = new String(line.getBytes(), flagLen, line.length() - flagLen);
                 } else if (line.startsWith(SSID_STR)) {
                     wifiSsid = WifiSsid.createFromAsciiEncoded(
                             line.substring(SSID_STR.length()));
@@ -1552,19 +2083,82 @@ public class WifiStateMachine extends StateMachine {
         }
     }
 
-    private void configureLinkProperties() {
-        if (mWifiConfigStore.isUsingStaticIp(mLastNetworkId)) {
-            mLinkProperties = mWifiConfigStore.getLinkProperties(mLastNetworkId);
-        } else {
-            synchronized (mDhcpResultsLock) {
-                if ((mDhcpResults != null) && (mDhcpResults.linkProperties != null)) {
-                    mLinkProperties = mDhcpResults.linkProperties;
+    /**
+     * Updates mLinkProperties by merging information from various sources.
+     *
+     * This is needed because the information in mLinkProperties comes from multiple sources (DHCP,
+     * netlink, static configuration, ...). When one of these sources of information has updated
+     * link properties, we can't just assign them to mLinkProperties or we'd lose track of the
+     * information that came from other sources. Instead, when one of those sources has new
+     * information, we update the object that tracks the information from that source and then
+     * call this method to apply the change to mLinkProperties.
+     *
+     * The information in mLinkProperties is currently obtained as follows:
+     * - Interface name: set in the constructor.
+     * - IPv4 and IPv6 addresses: netlink, via mInterfaceObserver.
+     * - IPv4 routes, DNS servers, and domains: DHCP.
+     * - HTTP proxy: the wifi config store.
+     */
+    private void updateLinkProperties() {
+        LinkProperties newLp = new LinkProperties();
+
+        // Interface name and proxy are locally configured.
+        newLp.setInterfaceName(mInterfaceName);
+        newLp.setHttpProxy(mWifiConfigStore.getProxyProperties(mLastNetworkId));
+
+        // IPv4 and IPv6 addresses come from netlink.
+        newLp.setLinkAddresses(mNetlinkLinkProperties.getLinkAddresses());
+
+        // For now, routing and DNS only come from DHCP or static configuration. In the future,
+        // we'll need to merge IPv6 DNS servers and domains coming from netlink.
+        synchronized (mDhcpResultsLock) {
+            // Even when we're using static configuration, we don't need to look at the config
+            // store, because static IP configuration also populates mDhcpResults.
+            if ((mDhcpResults != null) && (mDhcpResults.linkProperties != null)) {
+                LinkProperties lp = mDhcpResults.linkProperties;
+                for (RouteInfo route: lp.getRoutes()) {
+                    newLp.addRoute(route);
                 }
+                for (InetAddress dns: lp.getDnses()) {
+                    newLp.addDns(dns);
+                }
+                newLp.setDomains(lp.getDomains());
             }
-            mLinkProperties.setHttpProxy(mWifiConfigStore.getProxyProperties(mLastNetworkId));
         }
-        mLinkProperties.setInterfaceName(mInterfaceName);
-        if (DBG) log("netId=" + mLastNetworkId  + " Link configured: " + mLinkProperties);
+
+        // If anything has changed, and we're already connected, send out a notification.
+        // If we're still connecting, apps will be notified when we connect.
+        if (!newLp.equals(mLinkProperties)) {
+            if (DBG) {
+                log("Link configuration changed for netId: " + mLastNetworkId
+                        + " old: " + mLinkProperties + "new: " + newLp);
+            }
+            mLinkProperties = newLp;
+            if (getNetworkDetailedState() == DetailedState.CONNECTED) {
+                sendLinkConfigurationChangedBroadcast();
+            }
+        }
+    }
+
+    /**
+     * Clears all our link properties.
+     */
+    private void clearLinkProperties() {
+        // If the network used DHCP, clear the LinkProperties we stored in the config store.
+        if (!mWifiConfigStore.isUsingStaticIp(mLastNetworkId)) {
+            mWifiConfigStore.clearLinkProperties(mLastNetworkId);
+        }
+
+        // Clear the link properties obtained from DHCP and netlink.
+        synchronized(mDhcpResultsLock) {
+            if (mDhcpResults != null && mDhcpResults.linkProperties != null) {
+                mDhcpResults.linkProperties.clear();
+            }
+        }
+        mNetlinkLinkProperties.clear();
+
+        // Now clear the merged link properties.
+        mLinkProperties.clear();
     }
 
     private int getMaxDhcpRetries() {
@@ -1687,15 +2281,10 @@ public class WifiStateMachine extends StateMachine {
         mWifiConfigStore.updateStatus(mLastNetworkId, DetailedState.DISCONNECTED);
 
         /* Clear network properties */
-        mLinkProperties.clear();
+        clearLinkProperties();
 
         /* send event to CM & network change broadcast */
         sendNetworkStateChangeBroadcast(mLastBssid);
-
-        /* Clear IP settings if the network used DHCP */
-        if (!mWifiConfigStore.isUsingStaticIp(mLastNetworkId)) {
-            mWifiConfigStore.clearLinkProperties(mLastNetworkId);
-        }
 
         mLastBssid= null;
         mLastNetworkId = WifiConfiguration.INVALID_NETWORK_ID;
@@ -1705,13 +2294,13 @@ public class WifiStateMachine extends StateMachine {
         /* Socket connection can be lost when we do a graceful shutdown
         * or when the driver is hung. Ensure supplicant is stopped here.
         */
-        mWifiNative.killSupplicant(mP2pSupported);
-        mWifiNative.closeSupplicantConnection();
+        mWifiMonitor.killSupplicant(mP2pSupported);
         sendSupplicantConnectionChangedBroadcast(false);
         setWifiState(WIFI_STATE_DISABLED);
     }
 
     void handlePreDhcpSetup() {
+        mDhcpActive = true;
         if (!mBluetoothConnectionActive) {
             /*
              * There are problems setting the Wi-Fi driver's power
@@ -1740,6 +2329,16 @@ public class WifiStateMachine extends StateMachine {
         // TODO: Remove this comment when the driver is fixed.
         setSuspendOptimizationsNative(SUSPEND_DUE_TO_DHCP, false);
         mWifiNative.setPowerSave(false);
+
+        stopBatchedScan();
+
+        /* P2p discovery breaks dhcp, shut it down in order to get through this */
+        Message msg = new Message();
+        msg.what = WifiP2pService.BLOCK_DISCOVERY;
+        msg.arg1 = WifiP2pService.ENABLED;
+        msg.arg2 = DhcpStateMachine.CMD_PRE_DHCP_ACTION_COMPLETE;
+        msg.obj = mDhcpStateMachine;
+        mWifiP2pChannel.sendMessage(msg);
     }
 
 
@@ -1766,9 +2365,15 @@ public class WifiStateMachine extends StateMachine {
         setSuspendOptimizationsNative(SUSPEND_DUE_TO_DHCP, true);
         mWifiNative.setPowerSave(true);
 
+        mWifiP2pChannel.sendMessage(WifiP2pService.BLOCK_DISCOVERY, WifiP2pService.DISABLED);
+
         // Set the coexistence mode back to its default value
         mWifiNative.setBluetoothCoexistenceMode(
                 mWifiNative.BLUETOOTH_COEXISTENCE_MODE_SENSE);
+
+        mDhcpActive = false;
+
+        startBatchedScan();
     }
 
     private void handleSuccessfulIpConfiguration(DhcpResults dhcpResults) {
@@ -1786,20 +2391,7 @@ public class WifiStateMachine extends StateMachine {
         }
         mWifiInfo.setInetAddress(addr);
         mWifiInfo.setMeteredHint(dhcpResults.hasMeteredHint());
-        if (getNetworkDetailedState() == DetailedState.CONNECTED) {
-            //DHCP renewal in connected state
-            linkProperties.setHttpProxy(mWifiConfigStore.getProxyProperties(mLastNetworkId));
-            if (!linkProperties.equals(mLinkProperties)) {
-                if (DBG) {
-                    log("Link configuration changed for netId: " + mLastNetworkId
-                            + " old: " + mLinkProperties + "new: " + linkProperties);
-                }
-                mLinkProperties = linkProperties;
-                sendLinkConfigurationChangedBroadcast();
-            }
-        } else {
-            configureLinkProperties();
-        }
+        updateLinkProperties();
     }
 
     private void handleFailedIpConfiguration() {
@@ -1918,6 +2510,15 @@ public class WifiStateMachine extends StateMachine {
                         sendMessageAtFrontOfQueue(CMD_SET_COUNTRY_CODE, countryCode);
                     }
                     break;
+                case CMD_SET_BATCHED_SCAN:
+                    recordBatchedScanSettings(message.arg1, message.arg2, (Bundle)message.obj);
+                    break;
+                case CMD_POLL_BATCHED_SCAN:
+                    handleBatchedScanPollRequest();
+                    break;
+                case CMD_START_NEXT_BATCHED_SCAN:
+                    startNextBatchedScan();
+                    break;
                     /* Discard */
                 case CMD_START_SCAN:
                 case CMD_START_SUPPLICANT:
@@ -1937,6 +2538,7 @@ public class WifiStateMachine extends StateMachine {
                 case CMD_DISCONNECT:
                 case CMD_RECONNECT:
                 case CMD_REASSOCIATE:
+                case CMD_RELOAD_TLS_AND_RECONNECT:
                 case WifiMonitor.SUP_CONNECTION_EVENT:
                 case WifiMonitor.SUP_DISCONNECTION_EVENT:
                 case WifiMonitor.NETWORK_CONNECTION_EVENT:
@@ -1944,6 +2546,7 @@ public class WifiStateMachine extends StateMachine {
                 case WifiMonitor.SCAN_RESULTS_EVENT:
                 case WifiMonitor.SUPPLICANT_STATE_CHANGE_EVENT:
                 case WifiMonitor.AUTHENTICATION_FAILURE_EVENT:
+                case WifiMonitor.ASSOCIATION_REJECTION_EVENT:
                 case WifiMonitor.WPS_OVERLAP_EVENT:
                 case CMD_BLACKLIST_NETWORK:
                 case CMD_CLEAR_BLACKLIST:
@@ -2015,6 +2618,17 @@ public class WifiStateMachine extends StateMachine {
                     mTemporarilyDisconnectWifi = (message.arg1 == 1);
                     replyToMessage(message, WifiP2pService.DISCONNECT_WIFI_RESPONSE);
                     break;
+                case CMD_IP_ADDRESS_UPDATED:
+                    // addLinkAddress is a no-op if called more than once with the same address.
+                    if (mNetlinkLinkProperties.addLinkAddress((LinkAddress) message.obj)) {
+                        updateLinkProperties();
+                    }
+                    break;
+                case CMD_IP_ADDRESS_REMOVED:
+                    if (mNetlinkLinkProperties.removeLinkAddress((LinkAddress) message.obj)) {
+                        updateLinkProperties();
+                    }
+                    break;
                 default:
                     loge("Error! unhandled message" + message);
                     break;
@@ -2077,7 +2691,7 @@ public class WifiStateMachine extends StateMachine {
                         * Avoids issues with drivers that do not handle interface down
                         * on a running supplicant properly.
                         */
-                        mWifiNative.killSupplicant(mP2pSupported);
+                        mWifiMonitor.killSupplicant(mP2pSupported);
                         if(mWifiNative.startSupplicant(mP2pSupported)) {
                             setWifiState(WIFI_STATE_ENABLING);
                             if (DBG) log("Supplicant start successful");
@@ -2160,7 +2774,7 @@ public class WifiStateMachine extends StateMachine {
                 case WifiMonitor.SUP_DISCONNECTION_EVENT:
                     if (++mSupplicantRestartCount <= SUPPLICANT_RESTART_TRIES) {
                         loge("Failed to setup control channel, restart supplicant");
-                        mWifiNative.killSupplicant(mP2pSupported);
+                        mWifiMonitor.killSupplicant(mP2pSupported);
                         transitionTo(mInitialState);
                         sendMessageDelayed(CMD_START_SUPPLICANT, SUPPLICANT_RESTART_INTERVAL_MSECS);
                     } else {
@@ -2229,7 +2843,7 @@ public class WifiStateMachine extends StateMachine {
                     sendMessageDelayed(CMD_START_SUPPLICANT, SUPPLICANT_RESTART_INTERVAL_MSECS);
                     break;
                 case WifiMonitor.SCAN_RESULTS_EVENT:
-                    setScanResults(mWifiNative.scanResults());
+                    setScanResults();
                     sendScanResultsAvailableBroadcast();
                     mScanResultIsPending = false;
                     break;
@@ -2267,9 +2881,7 @@ public class WifiStateMachine extends StateMachine {
             }
 
             if (DBG) log("stopping supplicant");
-            if (!mWifiNative.stopSupplicant()) {
-                loge("Failed to stop supplicant");
-            }
+            mWifiMonitor.stopSupplicant();
 
             /* Send ourselves a delayed message to indicate failure after a wait time */
             sendMessageDelayed(obtainMessage(CMD_STOP_SUPPLICANT_FAILED,
@@ -2361,6 +2973,7 @@ public class WifiStateMachine extends StateMachine {
                 case WifiMonitor.NETWORK_CONNECTION_EVENT:
                 case WifiMonitor.NETWORK_DISCONNECTION_EVENT:
                 case WifiMonitor.AUTHENTICATION_FAILURE_EVENT:
+                case WifiMonitor.ASSOCIATION_REJECTION_EVENT:
                 case WifiMonitor.WPS_OVERLAP_EVENT:
                 case CMD_SET_COUNTRY_CODE:
                 case CMD_SET_FREQUENCY_BAND:
@@ -2409,13 +3022,24 @@ public class WifiStateMachine extends StateMachine {
                 mWifiNative.stopFilteringMulticastV4Packets();
             }
 
+            mDhcpActive = false;
+
+            startBatchedScan();
+
             if (mOperationalMode != CONNECT_MODE) {
                 mWifiNative.disconnect();
+                mWifiConfigStore.disableAllNetworks();
+                if (mOperationalMode == SCAN_ONLY_WITH_WIFI_OFF_MODE) {
+                    setWifiState(WIFI_STATE_DISABLED);
+                }
                 transitionTo(mScanModeState);
             } else {
                 /* Driver stop may have disabled networks, enable right after start */
                 mWifiConfigStore.enableAllNetworks();
+
+                if (DBG) log("Attempting to reconnect to wifi network ..");
                 mWifiNative.reconnect();
+
                 // Status pulls in the current supplicant state and network connection state
                 // events over the monitor connection. This helps framework sync up with
                 // current supplicant state
@@ -2435,7 +3059,15 @@ public class WifiStateMachine extends StateMachine {
             }
             mWifiNative.setPowerSave(true);
 
-            if (mP2pSupported) mWifiP2pChannel.sendMessage(WifiStateMachine.CMD_ENABLE_P2P);
+            if (mP2pSupported) {
+                if (mOperationalMode == CONNECT_MODE) {
+                    mWifiP2pChannel.sendMessage(WifiStateMachine.CMD_ENABLE_P2P);
+                } else {
+                    // P2P statemachine starts in disabled state, and is not enabled until
+                    // CMD_ENABLE_P2P is sent from here; so, nothing needs to be done to
+                    // keep it disabled.
+                }
+            }
 
             final Intent intent = new Intent(WifiManager.WIFI_SCAN_AVAILABLE);
             intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
@@ -2447,14 +3079,28 @@ public class WifiStateMachine extends StateMachine {
         public boolean processMessage(Message message) {
             switch(message.what) {
                 case CMD_START_SCAN:
-                    noteScanStart(message.arg1);
+                    noteScanStart(message.arg1, (WorkSource) message.obj);
                     startScanNative(WifiNative.SCAN_WITH_CONNECTION_SETUP);
+                    break;
+                case CMD_SET_BATCHED_SCAN:
+                    if (recordBatchedScanSettings(message.arg1, message.arg2,
+                            (Bundle)message.obj)) {
+                        startBatchedScan();
+                    }
                     break;
                 case CMD_SET_COUNTRY_CODE:
                     String country = (String) message.obj;
                     if (DBG) log("set country code " + country);
-                    if (!mWifiNative.setCountryCode(country.toUpperCase())) {
-                        loge("Failed to set country code " + country);
+                    if (country != null) {
+                        country = country.toUpperCase(Locale.ROOT);
+                        if (mLastSetCountryCode == null
+                                || country.equals(mLastSetCountryCode) == false) {
+                            if (mWifiNative.setCountryCode(country)) {
+                                mLastSetCountryCode = country;
+                            } else {
+                                loge("Failed to set country code " + country);
+                            }
+                        }
                     }
                     break;
                 case CMD_SET_FREQUENCY_BAND:
@@ -2462,6 +3108,8 @@ public class WifiStateMachine extends StateMachine {
                     if (DBG) log("set frequency band " + band);
                     if (mWifiNative.setBand(band)) {
                         mFrequencyBand.set(band);
+                        // flush old data - like scan results
+                        mWifiNative.bssFlush();
                         //Fetch the latest scan results when frequency band is set
                         startScanNative(WifiNative.SCAN_WITH_CONNECTION_SETUP);
                     } else {
@@ -2558,6 +3206,13 @@ public class WifiStateMachine extends StateMachine {
                         setSuspendOptimizationsNative(SUSPEND_DUE_TO_HIGH_PERF, true);
                     }
                     break;
+                case CMD_ENABLE_TDLS:
+                    if (message.obj != null) {
+                        String remoteAddress = (String) message.obj;
+                        boolean enable = (message.arg1 == 1);
+                        mWifiNative.startTdls(remoteAddress, enable);
+                    }
+                    break;
                 default:
                     return NOT_HANDLED;
             }
@@ -2569,11 +3224,15 @@ public class WifiStateMachine extends StateMachine {
             updateBatteryWorkSource(null);
             mScanResults = new ArrayList<ScanResult>();
 
+            stopBatchedScan();
+
             final Intent intent = new Intent(WifiManager.WIFI_SCAN_AVAILABLE);
             intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT);
             intent.putExtra(WifiManager.EXTRA_SCAN_AVAILABLE, WIFI_STATE_DISABLED);
             mContext.sendStickyBroadcastAsUser(intent, UserHandle.ALL);
             noteScanEnd(); // wrap up any pending request.
+
+            mLastSetCountryCode = null;
         }
     }
 
@@ -2689,31 +3348,26 @@ public class WifiStateMachine extends StateMachine {
         private int mLastOperationMode;
         @Override
         public void enter() {
-            mWifiConfigStore.disableAllNetworks();
             mLastOperationMode = mOperationalMode;
-            if (mLastOperationMode == SCAN_ONLY_WITH_WIFI_OFF_MODE) {
-                mWifiP2pChannel.sendMessage(CMD_DISABLE_P2P_REQ);
-                setWifiState(WIFI_STATE_DISABLED);
-            }
-        }
-        @Override
-        public void exit() {
-            if (mLastOperationMode == SCAN_ONLY_WITH_WIFI_OFF_MODE) {
-                setWifiState(WIFI_STATE_ENABLED);
-                // Load and re-enable networks when going back to enabled state
-                // This is essential for networks to show up after restore
-                mWifiConfigStore.loadAndEnableAllNetworks();
-                mWifiP2pChannel.sendMessage(CMD_ENABLE_P2P);
-            } else {
-                mWifiConfigStore.enableAllNetworks();
-            }
-            mWifiNative.reconnect();
         }
         @Override
         public boolean processMessage(Message message) {
             switch(message.what) {
                 case CMD_SET_OPERATIONAL_MODE:
                     if (message.arg1 == CONNECT_MODE) {
+
+                        if (mLastOperationMode == SCAN_ONLY_WITH_WIFI_OFF_MODE) {
+                            setWifiState(WIFI_STATE_ENABLED);
+                            // Load and re-enable networks when going back to enabled state
+                            // This is essential for networks to show up after restore
+                            mWifiConfigStore.loadAndEnableAllNetworks();
+                            mWifiP2pChannel.sendMessage(CMD_ENABLE_P2P);
+                        } else {
+                            mWifiConfigStore.enableAllNetworks();
+                        }
+
+                        mWifiNative.reconnect();
+
                         mOperationalMode = CONNECT_MODE;
                         transitionTo(mDisconnectedState);
                     } else {
@@ -2724,7 +3378,7 @@ public class WifiStateMachine extends StateMachine {
                 // Handle scan. All the connection related commands are
                 // handled only in ConnectModeState
                 case CMD_START_SCAN:
-                    noteScanStart(message.arg1);
+                    noteScanStart(message.arg1, (WorkSource) message.obj);
                     startScanNative(WifiNative.SCAN_WITHOUT_CONNECTION_SETUP);
                     break;
                 default:
@@ -2740,6 +3394,9 @@ public class WifiStateMachine extends StateMachine {
             WifiConfiguration config;
             boolean ok;
             switch(message.what) {
+                case WifiMonitor.ASSOCIATION_REJECTION_EVENT:
+                    mSupplicantStateTracker.sendMessage(WifiMonitor.ASSOCIATION_REJECTION_EVENT);
+                    break;
                 case WifiMonitor.AUTHENTICATION_FAILURE_EVENT:
                     mSupplicantStateTracker.sendMessage(WifiMonitor.AUTHENTICATION_FAILURE_EVENT);
                     break;
@@ -2841,6 +3498,13 @@ public class WifiStateMachine extends StateMachine {
                     break;
                 case CMD_REASSOCIATE:
                     mWifiNative.reassociate();
+                    break;
+                case CMD_RELOAD_TLS_AND_RECONNECT:
+                    if (mWifiConfigStore.needsUnlockedKeyStore()) {
+                        logd("Reconnecting to give a chance to un-connected TLS networks");
+                        mWifiNative.disconnect();
+                        mWifiNative.reconnect();
+                    }
                     break;
                 case WifiManager.CONNECT_NETWORK:
                     /* The connect message can contain a network id passed as arg1 on message or
@@ -2951,11 +3615,15 @@ public class WifiStateMachine extends StateMachine {
         }
 
         @Override
+        public void exit() {
+            handleNetworkDisconnect();
+        }
+
+        @Override
         public boolean processMessage(Message message) {
             switch (message.what) {
               case DhcpStateMachine.CMD_PRE_DHCP_ACTION:
                   handlePreDhcpSetup();
-                  mDhcpStateMachine.sendMessage(DhcpStateMachine.CMD_PRE_DHCP_ACTION_COMPLETE);
                   break;
               case DhcpStateMachine.CMD_POST_DHCP_ACTION:
                   handlePostDhcpSetup();
@@ -2988,7 +3656,7 @@ public class WifiStateMachine extends StateMachine {
                     break;
                 case CMD_START_SCAN:
                     /* Do not attempt to connect when we are already connected */
-                    noteScanStart(message.arg1);
+                    noteScanStart(message.arg1, (WorkSource) message.obj);
                     startScanNative(WifiNative.SCAN_WITHOUT_CONNECTION_SETUP);
                     break;
                     /* Ignore connection to same network */
@@ -3008,8 +3676,7 @@ public class WifiStateMachine extends StateMachine {
                         }
                         if (result.hasProxyChanged()) {
                             log("Reconfiguring proxy on connection");
-                            configureLinkProperties();
-                            sendLinkConfigurationChangedBroadcast();
+                            updateLinkProperties();
                         }
                     }
 
@@ -3063,13 +3730,14 @@ public class WifiStateMachine extends StateMachine {
         @Override
         public void enter() {
             if (!mWifiConfigStore.isUsingStaticIp(mLastNetworkId)) {
+                // TODO: If we're switching between static IP configuration and DHCP, remove the
+                // static configuration first.
                 startDhcp();
             } else {
                 // stop any running dhcp before assigning static IP
                 stopDhcp();
                 DhcpResults dhcpResults = new DhcpResults(
                         mWifiConfigStore.getLinkProperties(mLastNetworkId));
-                dhcpResults.linkProperties.setInterfaceName(mInterfaceName);
                 InterfaceConfiguration ifcg = new InterfaceConfiguration();
                 Iterator<LinkAddress> addrs =
                         dhcpResults.linkProperties.getLinkAddresses().iterator();
@@ -3126,6 +3794,7 @@ public class WifiStateMachine extends StateMachine {
     class VerifyingLinkState extends State {
         @Override
         public void enter() {
+            log(getName() + " enter");
             setNetworkDetailedState(DetailedState.VERIFYING_POOR_LINK);
             mWifiConfigStore.updateStatus(mLastNetworkId, DetailedState.VERIFYING_POOR_LINK);
             sendNetworkStateChangeBroadcast(mLastBssid);
@@ -3135,11 +3804,14 @@ public class WifiStateMachine extends StateMachine {
             switch (message.what) {
                 case WifiWatchdogStateMachine.POOR_LINK_DETECTED:
                     //stay here
+                    log(getName() + " POOR_LINK_DETECTED: no transition");
                     break;
                 case WifiWatchdogStateMachine.GOOD_LINK_DETECTED:
+                    log(getName() + " GOOD_LINK_DETECTED: transition to captive portal check");
                     transitionTo(mCaptivePortalCheckState);
                     break;
                 default:
+                    if (DBG) log(getName() + " what=" + message.what + " NOT_HANDLED");
                     return NOT_HANDLED;
             }
             return HANDLED;
@@ -3149,6 +3821,7 @@ public class WifiStateMachine extends StateMachine {
     class CaptivePortalCheckState extends State {
         @Override
         public void enter() {
+            log(getName() + " enter");
             setNetworkDetailedState(DetailedState.CAPTIVE_PORTAL_CHECK);
             mWifiConfigStore.updateStatus(mLastNetworkId, DetailedState.CAPTIVE_PORTAL_CHECK);
             sendNetworkStateChangeBroadcast(mLastBssid);
@@ -3157,6 +3830,7 @@ public class WifiStateMachine extends StateMachine {
         public boolean processMessage(Message message) {
             switch (message.what) {
                 case CMD_CAPTIVE_CHECK_COMPLETE:
+                    log(getName() + " CMD_CAPTIVE_CHECK_COMPLETE");
                     try {
                         mNwService.enableIpv6(mInterfaceName);
                     } catch (RemoteException re) {
@@ -3306,7 +3980,7 @@ public class WifiStateMachine extends StateMachine {
                     if (mP2pConnected.get()) break;
                     if (message.arg1 == mPeriodicScanToken &&
                             mWifiConfigStore.getConfiguredNetworks().size() == 0) {
-                        sendMessage(CMD_START_SCAN, UNKNOWN_SCAN_SOURCE);
+                        sendMessage(CMD_START_SCAN, UNKNOWN_SCAN_SOURCE, 0, (WorkSource) null);
                         sendMessageDelayed(obtainMessage(CMD_NO_NETWORKS_PERIODIC_SCAN,
                                     ++mPeriodicScanToken, 0), mSupplicantScanIntervalMs);
                     }
@@ -3323,6 +3997,13 @@ public class WifiStateMachine extends StateMachine {
                 case CMD_SET_OPERATIONAL_MODE:
                     if (message.arg1 != CONNECT_MODE) {
                         mOperationalMode = message.arg1;
+
+                        mWifiConfigStore.disableAllNetworks();
+                        if (mOperationalMode == SCAN_ONLY_WITH_WIFI_OFF_MODE) {
+                            mWifiP2pChannel.sendMessage(CMD_DISABLE_P2P_REQ);
+                            setWifiState(WIFI_STATE_DISABLED);
+                        }
+
                         transitionTo(mScanModeState);
                     }
                     break;
@@ -3469,6 +4150,9 @@ public class WifiStateMachine extends StateMachine {
                 case WifiMonitor.NETWORK_DISCONNECTION_EVENT:
                     if (DBG) log("Network connection lost");
                     handleNetworkDisconnect();
+                    break;
+                case WifiMonitor.ASSOCIATION_REJECTION_EVENT:
+                    if (DBG) log("Ignore Assoc reject event during WPS Connection");
                     break;
                 case WifiMonitor.AUTHENTICATION_FAILURE_EVENT:
                     // Disregard auth failure events during WPS connection. The
@@ -3642,6 +4326,7 @@ public class WifiStateMachine extends StateMachine {
                     if (!isWifiTethered(stateChange.active)) {
                         loge("Tethering reports wifi as untethered!, shut down soft Ap");
                         setHostApRunning(null, false);
+                        setHostApRunning(null, true);
                     }
                     return HANDLED;
                 case CMD_STOP_AP:
@@ -3732,7 +4417,7 @@ public class WifiStateMachine extends StateMachine {
     /**
      * arg2 on the source message has a unique id that needs to be retained in replies
      * to match the request
-     *
+
      * see WifiManager for details
      */
     private Message obtainMessageWithArg2(Message srcMsg) {

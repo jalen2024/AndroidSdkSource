@@ -120,6 +120,12 @@ public class AudioEffect {
             .fromString("58b4b260-8e06-11e0-aa8e-0002a5d5c51b");
 
     /**
+     * UUID for Loudness Enhancer
+     */
+    public static final UUID EFFECT_TYPE_LOUDNESS_ENHANCER = UUID
+              .fromString("fe3199be-aed0-413f-87bb-11260eb63cf1");
+
+    /**
      * Null effect UUID. Used when the UUID for effect type of
      * @hide
      */
@@ -193,10 +199,14 @@ public class AudioEffect {
      * The effect descriptor contains information on a particular effect implemented in the
      * audio framework:<br>
      * <ul>
-     *  <li>type: UUID identifying the effect type</li>
+     *  <li>type: UUID identifying the effect type. May be one of:
+     * {@link AudioEffect#EFFECT_TYPE_AEC}, {@link AudioEffect#EFFECT_TYPE_AGC},
+     * {@link AudioEffect#EFFECT_TYPE_BASS_BOOST}, {@link AudioEffect#EFFECT_TYPE_ENV_REVERB},
+     * {@link AudioEffect#EFFECT_TYPE_EQUALIZER}, {@link AudioEffect#EFFECT_TYPE_NS},
+     * {@link AudioEffect#EFFECT_TYPE_PRESET_REVERB}, {@link AudioEffect#EFFECT_TYPE_VIRTUALIZER}.
+     *  </li>
      *  <li>uuid: UUID for this particular implementation</li>
-     *  <li>connectMode: {@link #EFFECT_INSERT}, {@link #EFFECT_AUXILIARY} or
-     *  {at_link #EFFECT_PRE_PROCESSING}</li>
+     *  <li>connectMode: {@link #EFFECT_INSERT} or {@link #EFFECT_AUXILIARY}</li>
      *  <li>name: human readable effect name</li>
      *  <li>implementor: human readable effect implementor name</li>
      * </ul>
@@ -208,6 +218,19 @@ public class AudioEffect {
         public Descriptor() {
         }
 
+        /**
+         * @param type          UUID identifying the effect type. May be one of:
+         * {@link AudioEffect#EFFECT_TYPE_AEC}, {@link AudioEffect#EFFECT_TYPE_AGC},
+         * {@link AudioEffect#EFFECT_TYPE_BASS_BOOST}, {@link AudioEffect#EFFECT_TYPE_ENV_REVERB},
+         * {@link AudioEffect#EFFECT_TYPE_EQUALIZER}, {@link AudioEffect#EFFECT_TYPE_NS},
+         * {@link AudioEffect#EFFECT_TYPE_PRESET_REVERB},
+         * {@link AudioEffect#EFFECT_TYPE_VIRTUALIZER}.
+         * @param uuid         UUID for this particular implementation
+         * @param connectMode  {@link #EFFECT_INSERT} or {@link #EFFECT_AUXILIARY}
+         * @param name         human readable effect name
+         * @param implementor  human readable effect implementor name
+        *
+        */
         public Descriptor(String type, String uuid, String connectMode,
                 String name, String implementor) {
             this.type = UUID.fromString(type);
@@ -234,13 +257,14 @@ public class AudioEffect {
          */
         public UUID uuid;
         /**
-         *  Indicates if the effect is of insert category {@link #EFFECT_INSERT}, auxiliary
-         *  category {@link #EFFECT_AUXILIARY} or pre processing category
-         *  {at_link #EFFECT_PRE_PROCESSING}. Insert effects (Typically an Equalizer) are applied
+         *  Indicates if the effect is of insert category {@link #EFFECT_INSERT} or auxiliary
+         *  category {@link #EFFECT_AUXILIARY}.
+         *  Insert effects (typically an {@link Equalizer}) are applied
          *  to the entire audio source and usually not shared by several sources. Auxiliary effects
          *  (typically a reverberator) are applied to part of the signal (wet) and the effect output
          *  is added to the original signal (dry).
-         *  Audio pre processing are applied to audio captured on a particular AudioRecord.
+         *  Audio pre processing are applied to audio captured on a particular
+         * {@link android.media.AudioRecord}.
          */
         public String connectMode;
         /**

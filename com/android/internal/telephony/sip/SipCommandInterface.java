@@ -221,6 +221,20 @@ class SipCommandInterface extends BaseCommands implements CommandsInterface {
     }
 
     @Override
+    public void sendImsGsmSms (String smscPDU, String pdu,
+            int retry, int messageRef, Message response) {
+    }
+
+    @Override
+    public void sendImsCdmaSms(byte[] pdu, int retry, int messageRef,
+            Message response) {
+    }
+
+    @Override
+    public void getImsRegistrationState (Message result) {
+    }
+
+    @Override
     public void deleteSmsOnSim(int index, Message response) {
     }
 
@@ -535,5 +549,10 @@ class SipCommandInterface extends BaseCommands implements CommandsInterface {
 
     @Override
     public void setCellInfoListRate(int rateInMillis, Message response) {
+    }
+
+    @Override
+    public void setInitialAttachApn(String apn, String protocol, int authType, String username,
+            String password, Message result) {
     }
 }

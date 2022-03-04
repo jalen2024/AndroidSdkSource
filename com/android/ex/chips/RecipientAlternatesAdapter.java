@@ -73,9 +73,9 @@ public class RecipientAlternatesAdapter extends CursorAdapter {
         public void matchesNotFound(Set<String> unfoundAddresses);
     }
 
-    public static void getMatchingRecipients(Context context, ArrayList<String> inAddresses,
-            Account account, RecipientMatchCallback callback) {
-        getMatchingRecipients(context, inAddresses, QUERY_TYPE_EMAIL, account, callback);
+    public static void getMatchingRecipients(Context context, BaseRecipientAdapter adapter,
+            ArrayList<String> inAddresses, Account account, RecipientMatchCallback callback) {
+        getMatchingRecipients(context, adapter, inAddresses, QUERY_TYPE_EMAIL, account, callback);
     }
 
     /**
@@ -88,8 +88,9 @@ public class RecipientAlternatesAdapter extends CursorAdapter {
      * @param callback RecipientMatchCallback called when a match or matches are found.
      * @return HashMap<String,RecipientEntry>
      */
-    public static void getMatchingRecipients(Context context, ArrayList<String> inAddresses,
-            int addressType, Account account, RecipientMatchCallback callback) {
+    public static void getMatchingRecipients(Context context, BaseRecipientAdapter adapter,
+            ArrayList<String> inAddresses, int addressType, Account account,
+            RecipientMatchCallback callback) {
         Queries.Query query;
         if (addressType == QUERY_TYPE_EMAIL) {
             query = Queries.EMAIL;
@@ -140,8 +141,12 @@ public class RecipientAlternatesAdapter extends CursorAdapter {
             try {
                 directoryCursor = context.getContentResolver().query(DirectoryListQuery.URI,
                         DirectoryListQuery.PROJECTION, null, null, null);
-                paramsList = BaseRecipientAdapter.setupOtherDirectories(context, directoryCursor,
-                        account);
+                if (directoryCursor == null) {
+                    paramsList = null;
+                } else {
+                    paramsList = BaseRecipientAdapter.setupOtherDirectories(context,
+                            directoryCursor, account);
+                }
             } finally {
                 if (directoryCursor != null) {
                     directoryCursor.close();
@@ -157,40 +162,55 @@ public class RecipientAlternatesAdapter extends CursorAdapter {
 
             matchesNotFound.addAll(unresolvedAddresses);
 
-            Cursor directoryContactsCursor = null;
-            for (String unresolvedAddress : unresolvedAddresses) {
-                for (int i = 0; i < paramsList.size(); i++) {
-                    try {
-                        directoryContactsCursor = doQuery(unresolvedAddress, 1,
-                                paramsList.get(i).directoryId, account,
-                                context.getContentResolver(), query);
-                    } finally {
-                        if (directoryContactsCursor != null
-                                && directoryContactsCursor.getCount() == 0) {
-                            directoryContactsCursor.close();
-                            directoryContactsCursor = null;
-                        } else {
-                            break;
+            if (paramsList != null) {
+                Cursor directoryContactsCursor = null;
+                for (String unresolvedAddress : unresolvedAddresses) {
+                    for (int i = 0; i < paramsList.size(); i++) {
+                        try {
+                            directoryContactsCursor = doQuery(unresolvedAddress, 1,
+                                    paramsList.get(i).directoryId, account,
+                                    context.getContentResolver(), query);
+                        } finally {
+                            if (directoryContactsCursor != null
+                                    && directoryContactsCursor.getCount() == 0) {
+                                directoryContactsCursor.close();
+                                directoryContactsCursor = null;
+                            } else {
+                                break;
+                            }
                         }
                     }
-                }
-                if (directoryContactsCursor != null) {
-                    try {
-                        final Map<String, RecipientEntry> entries =
-                                processContactEntries(directoryContactsCursor);
+                    if (directoryContactsCursor != null) {
+                        try {
+                            final Map<String, RecipientEntry> entries =
+                                    processContactEntries(directoryContactsCursor);
 
-                        for (final String address : entries.keySet()) {
-                            matchesNotFound.remove(address);
+                            for (final String address : entries.keySet()) {
+                                matchesNotFound.remove(address);
+                            }
+
+                            callback.matchesFound(entries);
+                        } finally {
+                            directoryContactsCursor.close();
                         }
-
-                        callback.matchesFound(entries);
-                    } finally {
-                        directoryContactsCursor.close();
                     }
                 }
             }
         }
 
+        // If no matches found in contact provider or the directories, try the extension
+        // matcher.
+        // todo (aalbert): This whole method needs to be in the adapter?
+        if (adapter != null) {
+            final Map<String, RecipientEntry> entries =
+                    adapter.getMatchingRecipients(matchesNotFound);
+            if (entries != null && entries.size() > 0) {
+                callback.matchesFound(entries);
+                for (final String address : entries.keySet()) {
+                    matchesNotFound.remove(address);
+                }
+            }
+        }
         callback.matchesNotFound(matchesNotFound);
     }
 
@@ -209,7 +229,8 @@ public class RecipientAlternatesAdapter extends CursorAdapter {
                         c.getLong(Queries.Query.CONTACT_ID),
                         c.getLong(Queries.Query.DATA_ID),
                         c.getString(Queries.Query.PHOTO_THUMBNAIL_URI),
-                        true);
+                        true,
+                        false /* isGalContact TODO(skennedy) We should look these up eventually */);
 
                 /*
                  * In certain situations, we may have two results for one address, where one of the
@@ -409,7 +430,8 @@ public class RecipientAlternatesAdapter extends CursorAdapter {
                 c.getLong(Queries.Query.CONTACT_ID),
                 c.getLong(Queries.Query.DATA_ID),
                 c.getString(Queries.Query.PHOTO_THUMBNAIL_URI),
-                true);
+                true,
+                false /* isGalContact TODO(skennedy) We should look these up eventually */);
     }
 
     @Override

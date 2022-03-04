@@ -16,6 +16,10 @@
 
 package mock_android.view;
 
+import java.lang.JavaClass;
+
 public class View {
+
+        String x = JavaClass.test;
 
 }

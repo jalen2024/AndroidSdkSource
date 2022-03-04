@@ -177,7 +177,7 @@ class SocketChannelImpl extends SocketChannel implements FileDescriptorChannel {
             finished = IoBridge.connect(fd, normalAddr, port);
             isBound = finished;
         } catch (IOException e) {
-            if (e instanceof ConnectException && !isBlocking()) {
+            if (isEINPROGRESS(e)) {
                 status = SOCKET_STATUS_PENDING;
             } else {
                 if (isOpen()) {
@@ -207,6 +207,19 @@ class SocketChannelImpl extends SocketChannel implements FileDescriptorChannel {
             }
         }
         return finished;
+    }
+
+    private boolean isEINPROGRESS(IOException e) {
+        if (isBlocking()) {
+            return false;
+        }
+        if (e instanceof ConnectException) {
+            Throwable cause = e.getCause();
+            if (cause instanceof ErrnoException) {
+                return ((ErrnoException) cause).errno == EINPROGRESS;
+            }
+        }
+        return false;
     }
 
     private void initLocalAddressAndPort() {
@@ -456,9 +469,7 @@ class SocketChannelImpl extends SocketChannel implements FileDescriptorChannel {
     }
 
     @Override protected void implConfigureBlocking(boolean blocking) throws IOException {
-        synchronized (blockingLock()) {
-            IoUtils.setBlocking(fd, blocking);
-        }
+        IoUtils.setBlocking(fd, blocking);
     }
 
     /*
@@ -658,12 +669,12 @@ class SocketChannelImpl extends SocketChannel implements FileDescriptorChannel {
         }
 
         @Override
-        public int read(byte[] buffer, int offset, int byteCount) throws IOException {
-            Arrays.checkOffsetAndCount(buffer.length, offset, byteCount);
+        public int read(byte[] buffer, int byteOffset, int byteCount) throws IOException {
+            Arrays.checkOffsetAndCount(buffer.length, byteOffset, byteCount);
             if (!channel.isBlocking()) {
                 throw new IllegalBlockingModeException();
             }
-            ByteBuffer buf = ByteBuffer.wrap(buffer, offset, byteCount);
+            ByteBuffer buf = ByteBuffer.wrap(buffer, byteOffset, byteCount);
             return channel.read(buf);
         }
     }

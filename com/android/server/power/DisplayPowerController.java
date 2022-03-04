@@ -29,7 +29,6 @@ import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
-import android.hardware.SystemSensorManager;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
@@ -119,7 +118,7 @@ final class DisplayPowerController {
 
     // Proximity sensor debounce delay in milliseconds for positive or negative transitions.
     private static final int PROXIMITY_SENSOR_POSITIVE_DEBOUNCE_DELAY = 0;
-    private static final int PROXIMITY_SENSOR_NEGATIVE_DEBOUNCE_DELAY = 500;
+    private static final int PROXIMITY_SENSOR_NEGATIVE_DEBOUNCE_DELAY = 250;
 
     // Trigger proximity if distance is less than 5 cm.
     private static final float TYPICAL_PROXIMITY_THRESHOLD = 5.0f;
@@ -163,6 +162,10 @@ final class DisplayPowerController {
 
     // Notifier for sending asynchronous notifications.
     private final Notifier mNotifier;
+
+    // The display suspend blocker.
+    // Held while there are pending state change notifications.
+    private final SuspendBlocker mDisplaySuspendBlocker;
 
     // The display blanker.
     private final DisplayBlanker mDisplayBlanker;
@@ -271,7 +274,7 @@ final class DisplayPowerController {
 
     // The raw non-debounced proximity sensor state.
     private int mPendingProximity = PROXIMITY_UNKNOWN;
-    private long mPendingProximityDebounceTime;
+    private long mPendingProximityDebounceTime = -1; // -1 if fully debounced
 
     // True if the screen was turned off because of the proximity sensor.
     // When the screen turns on again, we report user activity to the power manager.
@@ -294,6 +297,10 @@ final class DisplayPowerController {
 
     // True if mAmbientLux holds a valid value.
     private boolean mAmbientLuxValid;
+
+    // The ambient light level threshold at which to brighten or darken the screen.
+    private float mBrighteningLuxThreshold;
+    private float mDarkeningLuxThreshold;
 
     // The most recent light sample.
     private float mLastObservedLux;
@@ -346,10 +353,11 @@ final class DisplayPowerController {
     public DisplayPowerController(Looper looper, Context context, Notifier notifier,
             LightsService lights, TwilightService twilight, SensorManager sensorManager,
             DisplayManagerService displayManager,
-            DisplayBlanker displayBlanker,
+            SuspendBlocker displaySuspendBlocker, DisplayBlanker displayBlanker,
             Callbacks callbacks, Handler callbackHandler) {
         mHandler = new DisplayControllerHandler(looper);
         mNotifier = notifier;
+        mDisplaySuspendBlocker = displaySuspendBlocker;
         mDisplayBlanker = displayBlanker;
         mCallbacks = callbacks;
         mCallbackHandler = callbackHandler;
@@ -601,7 +609,7 @@ final class DisplayPowerController {
                 if (!mScreenOffBecauseOfProximity
                         && mProximity == PROXIMITY_POSITIVE) {
                     mScreenOffBecauseOfProximity = true;
-                    sendOnProximityPositive();
+                    sendOnProximityPositiveWithWakelock();
                     setScreenOn(false);
                 }
             } else if (mWaitingForNegativeProximity
@@ -616,7 +624,7 @@ final class DisplayPowerController {
             if (mScreenOffBecauseOfProximity
                     && mProximity != PROXIMITY_POSITIVE) {
                 mScreenOffBecauseOfProximity = false;
-                sendOnProximityNegative();
+                sendOnProximityNegativeWithWakelock();
             }
         } else {
             mWaitingForNegativeProximity = false;
@@ -737,7 +745,7 @@ final class DisplayPowerController {
                     }
                 }
             }
-            sendOnStateChanged();
+            sendOnStateChangedWithWakelock();
         }
     }
 
@@ -810,54 +818,86 @@ final class DisplayPowerController {
     private void setProximitySensorEnabled(boolean enable) {
         if (enable) {
             if (!mProximitySensorEnabled) {
+                // Register the listener.
+                // Proximity sensor state already cleared initially.
                 mProximitySensorEnabled = true;
-                mPendingProximity = PROXIMITY_UNKNOWN;
                 mSensorManager.registerListener(mProximitySensorListener, mProximitySensor,
                         SensorManager.SENSOR_DELAY_NORMAL, mHandler);
             }
         } else {
             if (mProximitySensorEnabled) {
+                // Unregister the listener.
+                // Clear the proximity sensor state for next time.
                 mProximitySensorEnabled = false;
                 mProximity = PROXIMITY_UNKNOWN;
+                mPendingProximity = PROXIMITY_UNKNOWN;
                 mHandler.removeMessages(MSG_PROXIMITY_SENSOR_DEBOUNCED);
                 mSensorManager.unregisterListener(mProximitySensorListener);
+                clearPendingProximityDebounceTime(); // release wake lock (must be last)
             }
         }
     }
 
     private void handleProximitySensorEvent(long time, boolean positive) {
-        if (mPendingProximity == PROXIMITY_NEGATIVE && !positive) {
-            return; // no change
-        }
-        if (mPendingProximity == PROXIMITY_POSITIVE && positive) {
-            return; // no change
-        }
+        if (mProximitySensorEnabled) {
+            if (mPendingProximity == PROXIMITY_NEGATIVE && !positive) {
+                return; // no change
+            }
+            if (mPendingProximity == PROXIMITY_POSITIVE && positive) {
+                return; // no change
+            }
 
-        // Only accept a proximity sensor reading if it remains
-        // stable for the entire debounce delay.
-        mHandler.removeMessages(MSG_PROXIMITY_SENSOR_DEBOUNCED);
-        if (positive) {
-            mPendingProximity = PROXIMITY_POSITIVE;
-            mPendingProximityDebounceTime = time + PROXIMITY_SENSOR_POSITIVE_DEBOUNCE_DELAY;
-        } else {
-            mPendingProximity = PROXIMITY_NEGATIVE;
-            mPendingProximityDebounceTime = time + PROXIMITY_SENSOR_NEGATIVE_DEBOUNCE_DELAY;
+            // Only accept a proximity sensor reading if it remains
+            // stable for the entire debounce delay.  We hold a wake lock while
+            // debouncing the sensor.
+            mHandler.removeMessages(MSG_PROXIMITY_SENSOR_DEBOUNCED);
+            if (positive) {
+                mPendingProximity = PROXIMITY_POSITIVE;
+                setPendingProximityDebounceTime(
+                        time + PROXIMITY_SENSOR_POSITIVE_DEBOUNCE_DELAY); // acquire wake lock
+            } else {
+                mPendingProximity = PROXIMITY_NEGATIVE;
+                setPendingProximityDebounceTime(
+                        time + PROXIMITY_SENSOR_NEGATIVE_DEBOUNCE_DELAY); // acquire wake lock
+            }
+
+            // Debounce the new sensor reading.
+            debounceProximitySensor();
         }
-        debounceProximitySensor();
     }
 
     private void debounceProximitySensor() {
-        if (mPendingProximity != PROXIMITY_UNKNOWN) {
+        if (mProximitySensorEnabled
+                && mPendingProximity != PROXIMITY_UNKNOWN
+                && mPendingProximityDebounceTime >= 0) {
             final long now = SystemClock.uptimeMillis();
             if (mPendingProximityDebounceTime <= now) {
+                // Sensor reading accepted.  Apply the change then release the wake lock.
                 mProximity = mPendingProximity;
-                sendUpdatePowerState();
+                updatePowerState();
+                clearPendingProximityDebounceTime(); // release wake lock (must be last)
             } else {
+                // Need to wait a little longer.
+                // Debounce again later.  We continue holding a wake lock while waiting.
                 Message msg = mHandler.obtainMessage(MSG_PROXIMITY_SENSOR_DEBOUNCED);
                 msg.setAsynchronous(true);
                 mHandler.sendMessageAtTime(msg, mPendingProximityDebounceTime);
             }
         }
+    }
+
+    private void clearPendingProximityDebounceTime() {
+        if (mPendingProximityDebounceTime >= 0) {
+            mPendingProximityDebounceTime = -1;
+            mDisplaySuspendBlocker.release(); // release wake lock
+        }
+    }
+
+    private void setPendingProximityDebounceTime(long debounceTime) {
+        if (mPendingProximityDebounceTime < 0) {
+            mDisplaySuspendBlocker.acquire(); // acquire wake lock
+        }
+        mPendingProximityDebounceTime = debounceTime;
     }
 
     private void setLightSensorEnabled(boolean enable, boolean updateAutoBrightness) {
@@ -909,12 +949,24 @@ final class DisplayPowerController {
         mLastObservedLuxTime = time;
     }
 
+    private void setAmbientLux(float lux) {
+        mAmbientLux = lux;
+        mBrighteningLuxThreshold = mAmbientLux * (1.0f + BRIGHTENING_LIGHT_HYSTERESIS);
+        mDarkeningLuxThreshold = mAmbientLux * (1.0f - DARKENING_LIGHT_HYSTERESIS);
+    }
+
     private void updateAmbientLux(long time) {
         // If the light sensor was just turned on then immediately update our initial
         // estimate of the current ambient light level.
-        if (!mAmbientLuxValid
-                || (time - mLightSensorEnableTime) < mLightSensorWarmUpTimeConfig) {
-            mAmbientLux = mRecentShortTermAverageLux;
+        if (!mAmbientLuxValid) {
+            final long timeWhenSensorWarmedUp =
+                mLightSensorWarmUpTimeConfig + mLightSensorEnableTime;
+            if (time < timeWhenSensorWarmedUp) {
+                mHandler.sendEmptyMessageAtTime(MSG_LIGHT_SENSOR_DEBOUNCED,
+                        timeWhenSensorWarmedUp);
+                return;
+            }
+            setAmbientLux(mRecentShortTermAverageLux);
             mAmbientLuxValid = true;
             mDebounceLuxDirection = 0;
             mDebounceLuxTime = time;
@@ -925,98 +977,90 @@ final class DisplayPowerController {
                         + ", mAmbientLux=" + mAmbientLux);
             }
             updateAutoBrightness(true);
-            return;
-        }
-
-        // Determine whether the ambient environment appears to be brightening.
-        float brighteningLuxThreshold = mAmbientLux * (1.0f + BRIGHTENING_LIGHT_HYSTERESIS);
-        if (mRecentShortTermAverageLux > brighteningLuxThreshold
-                && mRecentLongTermAverageLux > brighteningLuxThreshold) {
+        } else if (mRecentShortTermAverageLux > mBrighteningLuxThreshold
+                && mRecentLongTermAverageLux > mBrighteningLuxThreshold) {
+            // The ambient environment appears to be brightening.
             if (mDebounceLuxDirection <= 0) {
                 mDebounceLuxDirection = 1;
                 mDebounceLuxTime = time;
                 if (DEBUG) {
                     Slog.d(TAG, "updateAmbientLux: Possibly brightened, waiting for "
                             + BRIGHTENING_LIGHT_DEBOUNCE + " ms: "
-                            + "brighteningLuxThreshold=" + brighteningLuxThreshold
+                            + "mBrighteningLuxThreshold=" + mBrighteningLuxThreshold
                             + ", mRecentShortTermAverageLux=" + mRecentShortTermAverageLux
                             + ", mRecentLongTermAverageLux=" + mRecentLongTermAverageLux
                             + ", mAmbientLux=" + mAmbientLux);
                 }
             }
             long debounceTime = mDebounceLuxTime + BRIGHTENING_LIGHT_DEBOUNCE;
-            if (time >= debounceTime) {
-                mAmbientLux = mRecentShortTermAverageLux;
-                if (DEBUG) {
-                    Slog.d(TAG, "updateAmbientLux: Brightened: "
-                            + "brighteningLuxThreshold=" + brighteningLuxThreshold
-                            + ", mRecentShortTermAverageLux=" + mRecentShortTermAverageLux
-                            + ", mRecentLongTermAverageLux=" + mRecentLongTermAverageLux
-                            + ", mAmbientLux=" + mAmbientLux);
-                }
-                updateAutoBrightness(true);
-            } else {
+            if (time < debounceTime) {
                 mHandler.sendEmptyMessageAtTime(MSG_LIGHT_SENSOR_DEBOUNCED, debounceTime);
+                return;
             }
-            return;
-        }
-
-        // Determine whether the ambient environment appears to be darkening.
-        float darkeningLuxThreshold = mAmbientLux * (1.0f - DARKENING_LIGHT_HYSTERESIS);
-        if (mRecentShortTermAverageLux < darkeningLuxThreshold
-                && mRecentLongTermAverageLux < darkeningLuxThreshold) {
+            setAmbientLux(mRecentShortTermAverageLux);
+            if (DEBUG) {
+                Slog.d(TAG, "updateAmbientLux: Brightened: "
+                        + "mBrighteningLuxThreshold=" + mBrighteningLuxThreshold
+                        + ", mRecentShortTermAverageLux=" + mRecentShortTermAverageLux
+                        + ", mRecentLongTermAverageLux=" + mRecentLongTermAverageLux
+                        + ", mAmbientLux=" + mAmbientLux);
+            }
+            updateAutoBrightness(true);
+        } else if (mRecentShortTermAverageLux < mDarkeningLuxThreshold
+                && mRecentLongTermAverageLux < mDarkeningLuxThreshold) {
+            // The ambient environment appears to be darkening.
             if (mDebounceLuxDirection >= 0) {
                 mDebounceLuxDirection = -1;
                 mDebounceLuxTime = time;
                 if (DEBUG) {
                     Slog.d(TAG, "updateAmbientLux: Possibly darkened, waiting for "
                             + DARKENING_LIGHT_DEBOUNCE + " ms: "
-                            + "darkeningLuxThreshold=" + darkeningLuxThreshold
+                            + "mDarkeningLuxThreshold=" + mDarkeningLuxThreshold
                             + ", mRecentShortTermAverageLux=" + mRecentShortTermAverageLux
                             + ", mRecentLongTermAverageLux=" + mRecentLongTermAverageLux
                             + ", mAmbientLux=" + mAmbientLux);
                 }
             }
             long debounceTime = mDebounceLuxTime + DARKENING_LIGHT_DEBOUNCE;
-            if (time >= debounceTime) {
-                // Be conservative about reducing the brightness, only reduce it a little bit
-                // at a time to avoid having to bump it up again soon.
-                mAmbientLux = Math.max(mRecentShortTermAverageLux, mRecentLongTermAverageLux);
-                if (DEBUG) {
-                    Slog.d(TAG, "updateAmbientLux: Darkened: "
-                            + "darkeningLuxThreshold=" + darkeningLuxThreshold
-                            + ", mRecentShortTermAverageLux=" + mRecentShortTermAverageLux
-                            + ", mRecentLongTermAverageLux=" + mRecentLongTermAverageLux
-                            + ", mAmbientLux=" + mAmbientLux);
-                }
-                updateAutoBrightness(true);
-            } else {
+            if (time < debounceTime) {
                 mHandler.sendEmptyMessageAtTime(MSG_LIGHT_SENSOR_DEBOUNCED, debounceTime);
+                return;
             }
-            return;
-        }
-
-        // No change or change is within the hysteresis thresholds.
-        if (mDebounceLuxDirection != 0) {
+            // Be conservative about reducing the brightness, only reduce it a little bit
+            // at a time to avoid having to bump it up again soon.
+            setAmbientLux(Math.max(mRecentShortTermAverageLux, mRecentLongTermAverageLux));
+            if (DEBUG) {
+                Slog.d(TAG, "updateAmbientLux: Darkened: "
+                        + "mDarkeningLuxThreshold=" + mDarkeningLuxThreshold
+                        + ", mRecentShortTermAverageLux=" + mRecentShortTermAverageLux
+                        + ", mRecentLongTermAverageLux=" + mRecentLongTermAverageLux
+                        + ", mAmbientLux=" + mAmbientLux);
+            }
+            updateAutoBrightness(true);
+        } else if (mDebounceLuxDirection != 0) {
+            // No change or change is within the hysteresis thresholds.
             mDebounceLuxDirection = 0;
             mDebounceLuxTime = time;
             if (DEBUG) {
                 Slog.d(TAG, "updateAmbientLux: Canceled debounce: "
-                        + "brighteningLuxThreshold=" + brighteningLuxThreshold
-                        + ", darkeningLuxThreshold=" + darkeningLuxThreshold
+                        + "mBrighteningLuxThreshold=" + mBrighteningLuxThreshold
+                        + ", mDarkeningLuxThreshold=" + mDarkeningLuxThreshold
                         + ", mRecentShortTermAverageLux=" + mRecentShortTermAverageLux
                         + ", mRecentLongTermAverageLux=" + mRecentLongTermAverageLux
                         + ", mAmbientLux=" + mAmbientLux);
             }
         }
 
-        // If the light level does not change, then the sensor may not report
-        // a new value.  This can cause problems for the auto-brightness algorithm
-        // because the filters might not be updated.  To work around it, we want to
-        // make sure to update the filters whenever the observed light level could
-        // possibly exceed one of the hysteresis thresholds.
-        if (mLastObservedLux > brighteningLuxThreshold
-                || mLastObservedLux < darkeningLuxThreshold) {
+        // Now that we've done all of that, we haven't yet posted a debounce
+        // message. So consider the case where current lux is beyond the
+        // threshold. It's possible that the light sensor may not report values
+        // if the light level does not change, so we need to occasionally
+        // synthesize sensor readings in order to make sure the brightness is
+        // adjusted accordingly. Note these thresholds may have changed since
+        // we entered the function because we called setAmbientLux and
+        // updateAutoBrightness along the way.
+        if (mLastObservedLux > mBrighteningLuxThreshold
+                || mLastObservedLux < mDarkeningLuxThreshold) {
             mHandler.sendEmptyMessageAtTime(MSG_LIGHT_SENSOR_DEBOUNCED,
                     time + SYNTHETIC_LIGHT_SENSOR_RATE_MILLIS);
         }
@@ -1120,7 +1164,8 @@ final class DisplayPowerController {
         return x + (y - x) * alpha;
     }
 
-    private void sendOnStateChanged() {
+    private void sendOnStateChangedWithWakelock() {
+        mDisplaySuspendBlocker.acquire();
         mCallbackHandler.post(mOnStateChangedRunnable);
     }
 
@@ -1128,10 +1173,12 @@ final class DisplayPowerController {
         @Override
         public void run() {
             mCallbacks.onStateChanged();
+            mDisplaySuspendBlocker.release();
         }
     };
 
-    private void sendOnProximityPositive() {
+    private void sendOnProximityPositiveWithWakelock() {
+        mDisplaySuspendBlocker.acquire();
         mCallbackHandler.post(mOnProximityPositiveRunnable);
     }
 
@@ -1139,10 +1186,12 @@ final class DisplayPowerController {
         @Override
         public void run() {
             mCallbacks.onProximityPositive();
+            mDisplaySuspendBlocker.release();
         }
     };
 
-    private void sendOnProximityNegative() {
+    private void sendOnProximityNegativeWithWakelock() {
+        mDisplaySuspendBlocker.acquire();
         mCallbackHandler.post(mOnProximityNegativeRunnable);
     }
 
@@ -1150,6 +1199,7 @@ final class DisplayPowerController {
         @Override
         public void run() {
             mCallbacks.onProximityNegative();
+            mDisplaySuspendBlocker.release();
         }
     };
 

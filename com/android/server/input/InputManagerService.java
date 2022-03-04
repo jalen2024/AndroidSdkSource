@@ -283,7 +283,7 @@ public class InputManagerService extends IInputManager.Stub
     }
 
     // TODO(BT) Pass in paramter for bluetooth system
-    public void systemReady() {
+    public void systemRunning() {
         if (DEBUG) {
             Slog.d(TAG, "System ready.");
         }
@@ -294,6 +294,7 @@ public class InputManagerService extends IInputManager.Stub
         IntentFilter filter = new IntentFilter(Intent.ACTION_PACKAGE_ADDED);
         filter.addAction(Intent.ACTION_PACKAGE_REMOVED);
         filter.addAction(Intent.ACTION_PACKAGE_CHANGED);
+        filter.addAction(Intent.ACTION_PACKAGE_REPLACED);
         filter.addDataScheme("package");
         mContext.registerReceiver(new BroadcastReceiver() {
             @Override
@@ -1292,8 +1293,9 @@ public class InputManagerService extends IInputManager.Stub
 
     // Native callback.
     private long notifyANR(InputApplicationHandle inputApplicationHandle,
-            InputWindowHandle inputWindowHandle) {
-        return mWindowManagerCallbacks.notifyANR(inputApplicationHandle, inputWindowHandle);
+            InputWindowHandle inputWindowHandle, String reason) {
+        return mWindowManagerCallbacks.notifyANR(
+                inputApplicationHandle, inputWindowHandle, reason);
     }
 
     // Native callback.
@@ -1477,7 +1479,7 @@ public class InputManagerService extends IInputManager.Stub
         public void notifyInputChannelBroken(InputWindowHandle inputWindowHandle);
 
         public long notifyANR(InputApplicationHandle inputApplicationHandle,
-                InputWindowHandle inputWindowHandle);
+                InputWindowHandle inputWindowHandle, String reason);
 
         public int interceptKeyBeforeQueueing(KeyEvent event, int policyFlags, boolean isScreenOn);
 

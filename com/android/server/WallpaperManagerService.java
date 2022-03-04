@@ -40,6 +40,7 @@ import android.content.pm.ServiceInfo;
 import android.content.pm.PackageManager.NameNotFoundException;
 import android.content.pm.UserInfo;
 import android.content.res.Resources;
+import android.graphics.Point;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Environment;
@@ -219,6 +220,8 @@ class WallpaperManagerService extends IWallpaperManager.Stub {
         WallpaperData mWallpaper;
         IRemoteCallback mReply;
 
+        boolean mDimensionsChanged = false;
+
         public WallpaperConnection(WallpaperInfo info, WallpaperData wallpaper) {
             mInfo = info;
             mWallpaper = wallpaper;
@@ -262,6 +265,14 @@ class WallpaperManagerService extends IWallpaperManager.Stub {
         public void attachEngine(IWallpaperEngine engine) {
             synchronized (mLock) {
                 mEngine = engine;
+                if (mDimensionsChanged) {
+                    try {
+                        mEngine.setDesiredSize(mWallpaper.width, mWallpaper.height);
+                    } catch (RemoteException e) {
+                        Slog.w(TAG, "Failed to set wallpaper dimensions", e);
+                    }
+                    mDimensionsChanged = false;
+                }
             }
         }
 
@@ -449,7 +460,7 @@ class WallpaperManagerService extends IWallpaperManager.Stub {
         }
     }
 
-    public void systemReady() {
+    public void systemRunning() {
         if (DEBUG) Slog.v(TAG, "systemReady");
         WallpaperData wallpaper = mWallpaperMap.get(UserHandle.USER_OWNER);
         switchWallpaper(wallpaper, null);
@@ -627,6 +638,14 @@ class WallpaperManagerService extends IWallpaperManager.Stub {
         return false;
     }
 
+    private Point getDefaultDisplaySize() {
+        Point p = new Point();
+        WindowManager wm = (WindowManager)mContext.getSystemService(Context.WINDOW_SERVICE);
+        Display d = wm.getDefaultDisplay();
+        d.getRealSize(p);
+        return p;
+    }
+
     public void setDimensionHints(int width, int height) throws RemoteException {
         checkPermission(android.Manifest.permission.SET_WALLPAPER_HINTS);
         synchronized (mLock) {
@@ -638,6 +657,10 @@ class WallpaperManagerService extends IWallpaperManager.Stub {
             if (width <= 0 || height <= 0) {
                 throw new IllegalArgumentException("width and height must be > 0");
             }
+            // Make sure it is at least as large as the display.
+            Point displaySize = getDefaultDisplaySize();
+            width = Math.max(width, displaySize.x);
+            height = Math.max(height, displaySize.y);
 
             if (width != wallpaper.width || height != wallpaper.height) {
                 wallpaper.width = width;
@@ -652,6 +675,11 @@ class WallpaperManagerService extends IWallpaperManager.Stub {
                         } catch (RemoteException e) {
                         }
                         notifyCallbacksLocked(wallpaper);
+                    } else if (wallpaper.connection.mService != null) {
+                        // We've attached to the service but the engine hasn't attached back to us
+                        // yet. This means it will be created with the previous dimensions, so we
+                        // need to update it to the new dimensions once it attaches.
+                        wallpaper.connection.mDimensionsChanged = true;
                     }
                 }
             }
@@ -821,6 +849,11 @@ class WallpaperManagerService extends IWallpaperManager.Stub {
             int serviceUserId = wallpaper.userId;
             ServiceInfo si = mIPackageManager.getServiceInfo(componentName,
                     PackageManager.GET_META_DATA | PackageManager.GET_PERMISSIONS, serviceUserId);
+            if (si == null) {
+                // The wallpaper component we're trying to use doesn't exist
+                Slog.w(TAG, "Attempted wallpaper " + componentName + " is unavailable");
+                return false;
+            }
             if (!android.Manifest.permission.BIND_WALLPAPER.equals(si.permission)) {
                 String msg = "Selected service does not require "
                         + android.Manifest.permission.BIND_WALLPAPER
@@ -885,7 +918,8 @@ class WallpaperManagerService extends IWallpaperManager.Stub {
                     Intent.createChooser(new Intent(Intent.ACTION_SET_WALLPAPER),
                             mContext.getText(com.android.internal.R.string.chooser_wallpaper)),
                     0, null, new UserHandle(serviceUserId)));
-            if (!mContext.bindServiceAsUser(intent, newConn, Context.BIND_AUTO_CREATE,
+            if (!mContext.bindServiceAsUser(intent, newConn,
+                    Context.BIND_AUTO_CREATE | Context.BIND_SHOWING_UI,
                     new UserHandle(serviceUserId))) {
                 String msg = "Unable to bind service: "
                         + componentName;
@@ -1125,15 +1159,19 @@ class WallpaperManagerService extends IWallpaperManager.Stub {
         }
 
         // We always want to have some reasonable width hint.
-        WindowManager wm = (WindowManager)mContext.getSystemService(Context.WINDOW_SERVICE);
-        Display d = wm.getDefaultDisplay();
-        int baseSize = d.getMaximumSizeDimension();
+        int baseSize = getMaximumSizeDimension();
         if (wallpaper.width < baseSize) {
             wallpaper.width = baseSize;
         }
         if (wallpaper.height < baseSize) {
             wallpaper.height = baseSize;
         }
+    }
+
+    private int getMaximumSizeDimension() {
+        WindowManager wm = (WindowManager)mContext.getSystemService(Context.WINDOW_SERVICE);
+        Display d = wm.getDefaultDisplay();
+        return d.getMaximumSizeDimension();
     }
 
     // Called by SystemBackupAgent after files are restored to disk.

@@ -25,6 +25,7 @@ import android.os.Binder;
 import android.os.Build.VERSION_CODES;
 import android.os.Messenger;
 import android.os.RemoteException;
+import android.os.ResultReceiver;
 import android.provider.Settings;
 
 import java.net.InetAddress;
@@ -354,11 +355,17 @@ public class ConnectivityManager {
      */
     public static final int TYPE_WIFI_P2P    = 13;
 
-    /** {@hide} */
-    public static final int MAX_RADIO_TYPE   = TYPE_WIFI_P2P;
+    /**
+     * The network to use for initially attaching to the network
+     * {@hide}
+     */
+    public static final int TYPE_MOBILE_IA = 14;
 
     /** {@hide} */
-    public static final int MAX_NETWORK_TYPE = TYPE_WIFI_P2P;
+    public static final int MAX_RADIO_TYPE   = TYPE_MOBILE_IA;
+
+    /** {@hide} */
+    public static final int MAX_NETWORK_TYPE = TYPE_MOBILE_IA;
 
     /**
      * If you want to set the default network preference,you can directly
@@ -435,6 +442,8 @@ public class ConnectivityManager {
                 return "MOBILE_CBS";
             case TYPE_WIFI_P2P:
                 return "WIFI_P2P";
+            case TYPE_MOBILE_IA:
+                return "MOBILE_IA";
             default:
                 return Integer.toString(type);
         }
@@ -457,6 +466,39 @@ public class ConnectivityManager {
             case TYPE_MOBILE_FOTA:
             case TYPE_MOBILE_IMS:
             case TYPE_MOBILE_CBS:
+            case TYPE_MOBILE_IA:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Checks if the given network type is backed by a Wi-Fi radio.
+     *
+     * @hide
+     */
+    public static boolean isNetworkTypeWifi(int networkType) {
+        switch (networkType) {
+            case TYPE_WIFI:
+            case TYPE_WIFI_P2P:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * Checks if the given network type should be exempt from VPN routing rules
+     *
+     * @hide
+     */
+    public static boolean isNetworkTypeExempt(int networkType) {
+        switch (networkType) {
+            case TYPE_MOBILE_MMS:
+            case TYPE_MOBILE_SUPL:
+            case TYPE_MOBILE_HIPRI:
+            case TYPE_MOBILE_IA:
                 return true;
             default:
                 return false;
@@ -576,6 +618,29 @@ public class ConnectivityManager {
     public NetworkInfo[] getAllNetworkInfo() {
         try {
             return mService.getAllNetworkInfo();
+        } catch (RemoteException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Returns details about the Provisioning or currently active default data network. When
+     * connected, this network is the default route for outgoing connections.
+     * You should always check {@link NetworkInfo#isConnected()} before initiating
+     * network traffic. This may return {@code null} when there is no default
+     * network.
+     *
+     * @return a {@link NetworkInfo} object for the current default network
+     *        or {@code null} if no network default network is currently active
+     *
+     * <p>This method requires the call to hold the permission
+     * {@link android.Manifest.permission#ACCESS_NETWORK_STATE}.
+     *
+     * {@hide}
+     */
+    public NetworkInfo getProvisioningOrActiveNetworkInfo() {
+        try {
+            return mService.getProvisioningOrActiveNetworkInfo();
         } catch (RemoteException e) {
             return null;
         }
@@ -1282,6 +1347,25 @@ public class ConnectivityManager {
     }
 
     /**
+     * Signal that the captive portal check on the indicated network
+     * is complete and whether its a captive portal or not.
+     *
+     * @param info the {@link NetworkInfo} object for the networkType
+     *        in question.
+     * @param isCaptivePortal true/false.
+     *
+     * <p>This method requires the call to hold the permission
+     * {@link android.Manifest.permission#CONNECTIVITY_INTERNAL}.
+     * {@hide}
+     */
+    public void captivePortalCheckCompleted(NetworkInfo info, boolean isCaptivePortal) {
+        try {
+            mService.captivePortalCheckCompleted(info, isCaptivePortal);
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
      * Supply the backend messenger for a network tracker
      *
      * @param type NetworkType to set
@@ -1291,6 +1375,120 @@ public class ConnectivityManager {
     public void supplyMessenger(int networkType, Messenger messenger) {
         try {
             mService.supplyMessenger(networkType, messenger);
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * Check mobile provisioning.
+     *
+     * @param suggestedTimeOutMs, timeout in milliseconds
+     *
+     * @return time out that will be used, maybe less that suggestedTimeOutMs
+     * -1 if an error.
+     *
+     * {@hide}
+     */
+    public int checkMobileProvisioning(int suggestedTimeOutMs) {
+        int timeOutMs = -1;
+        try {
+            timeOutMs = mService.checkMobileProvisioning(suggestedTimeOutMs);
+        } catch (RemoteException e) {
+        }
+        return timeOutMs;
+    }
+
+    /**
+     * Get the mobile provisioning url.
+     * {@hide}
+     */
+    public String getMobileProvisioningUrl() {
+        try {
+            return mService.getMobileProvisioningUrl();
+        } catch (RemoteException e) {
+        }
+        return null;
+    }
+
+    /**
+     * Get the mobile redirected provisioning url.
+     * {@hide}
+     */
+    public String getMobileRedirectedProvisioningUrl() {
+        try {
+            return mService.getMobileRedirectedProvisioningUrl();
+        } catch (RemoteException e) {
+        }
+        return null;
+    }
+
+    /**
+     * get the information about a specific network link
+     * @hide
+     */
+    public LinkQualityInfo getLinkQualityInfo(int networkType) {
+        try {
+            LinkQualityInfo li = mService.getLinkQualityInfo(networkType);
+            return li;
+        } catch (RemoteException e) {
+            return null;
+        }
+    }
+
+    /**
+     * get the information of currently active network link
+     * @hide
+     */
+    public LinkQualityInfo getActiveLinkQualityInfo() {
+        try {
+            LinkQualityInfo li = mService.getActiveLinkQualityInfo();
+            return li;
+        } catch (RemoteException e) {
+            return null;
+        }
+    }
+
+    /**
+     * get the information of all network links
+     * @hide
+     */
+    public LinkQualityInfo[] getAllLinkQualityInfo() {
+        try {
+            LinkQualityInfo[] li = mService.getAllLinkQualityInfo();
+            return li;
+        } catch (RemoteException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Set sign in error notification to visible or in visible
+     *
+     * @param visible
+     * @param networkType
+     *
+     * {@hide}
+     */
+    public void setProvisioningNotificationVisible(boolean visible, int networkType,
+            String extraInfo, String url) {
+        try {
+            mService.setProvisioningNotificationVisible(visible, networkType, extraInfo, url);
+        } catch (RemoteException e) {
+        }
+    }
+
+    /**
+     * Set the value for enabling/disabling airplane mode
+     *
+     * @param enable whether to enable airplane mode or not
+     *
+     * <p>This method requires the call to hold the permission
+     * {@link android.Manifest.permission#CONNECTIVITY_INTERNAL}.
+     * @hide
+     */
+    public void setAirplaneMode(boolean enable) {
+        try {
+            mService.setAirplaneMode(enable);
         } catch (RemoteException e) {
         }
     }

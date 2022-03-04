@@ -30,7 +30,7 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import org.apache.harmony.security.asn1.ObjectIdentifier;
-import org.apache.harmony.xnet.provider.jsse.NativeCrypto;
+import org.apache.harmony.security.fortress.Services;
 
 /**
  * Provides Algorithm Name to OID and OID to Algorithm Name mappings. Some known
@@ -38,6 +38,9 @@ import org.apache.harmony.xnet.provider.jsse.NativeCrypto;
  * providers during initialization.
  */
 public class AlgNameMapper {
+    private static AlgNameMapperSource source = null;
+
+    private static volatile int cacheVersion = -1;
 
     // Will search OID mappings for these services
     private static final String[] serviceName = {
@@ -90,20 +93,27 @@ public class AlgNameMapper {
             // map upper case alg name to its original name
             algAliasesMap.put(algUC, element[1]);
         }
-        //
-        // Now search providers for mappings like
-        // Alg.Alias.<service>.<OID-INTS-DOT-SEPARATED>=<alg-name>
-        //  or
-        // Alg.Alias.<service>.OID.<OID-INTS-DOT-SEPARATED>=<alg-name>
-        //
-        Provider[] pl = Security.getProviders();
-        for (Provider element : pl) {
-            selectEntries(element);
-        }
     }
 
     // No instances
     private AlgNameMapper() {
+    }
+
+    private static synchronized void checkCacheVersion() {
+        int newCacheVersion = Services.getCacheVersion();
+        if (newCacheVersion != cacheVersion) {
+            //
+            // Now search providers for mappings like
+            // Alg.Alias.<service>.<OID-INTS-DOT-SEPARATED>=<alg-name>
+            //  or
+            // Alg.Alias.<service>.OID.<OID-INTS-DOT-SEPARATED>=<alg-name>
+            //
+            Provider[] pl = Security.getProviders();
+            for (Provider element : pl) {
+                selectEntries(element);
+            }
+            cacheVersion = newCacheVersion;
+        }
     }
 
     /**
@@ -113,13 +123,21 @@ public class AlgNameMapper {
      * @return OID as String
      */
     public static String map2OID(String algName) {
+        checkCacheVersion();
+
         // alg2OidMap map contains upper case keys
-        final String result = alg2OidMap.get(algName.toUpperCase(Locale.US));
+        String result = alg2OidMap.get(algName.toUpperCase(Locale.US));
         if (result != null) {
             return result;
         }
 
-        return NativeCrypto.OBJ_txt2nid_oid(algName);
+        // Check our external source.
+        AlgNameMapperSource s = source;
+        if (s != null) {
+            return s.mapNameToOid(algName);
+        }
+
+        return null;
     }
 
     /**
@@ -129,6 +147,8 @@ public class AlgNameMapper {
      * @return algorithm name
      */
     public static String map2AlgName(String oid) {
+        checkCacheVersion();
+
         // oid2AlgMap map contains upper case values
         String algUC = oid2AlgMap.get(oid);
         // if not null there is always map UC->Orig
@@ -136,8 +156,13 @@ public class AlgNameMapper {
             return algAliasesMap.get(algUC);
         }
 
-        // If we don't know about this OID, ask OpenSSL if it does.
-        return NativeCrypto.OBJ_txt2nid_longName(oid);
+        // Check our external source.
+        AlgNameMapperSource s = source;
+        if (s != null) {
+            return s.mapOidToName(oid);
+        }
+
+        return null;
     }
 
     /**
@@ -211,5 +236,9 @@ public class AlgNameMapper {
         return oid.startsWith("OID.")
             ? oid.substring(4)
             : oid;
+    }
+
+    public static void setSource(AlgNameMapperSource source) {
+        AlgNameMapper.source = source;
     }
 }
